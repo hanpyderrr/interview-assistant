@@ -3,19 +3,16 @@
  *
  * Uses 30ms windows (480 samples), RMS threshold 0.008,
  * 700ms hangover (~23 frames), 250ms min speech duration (~8 frames),
- * and 15000ms max segment duration (force-flush).
+ * and 14000ms max segment duration (force-flush).
  */
 
-export interface SpeechSegment {
-  samples: Float32Array;
-  durationMs: number;
-}
+import type { SpeechSegment } from './types';
 
 const WINDOW_SIZE = 480;       // 30ms at 16kHz
 const RMS_THRESHOLD = 0.008;
 const HANGOVER_FRAMES = 10;    // ~300ms — must be shorter than Rust SilenceSuppressor hangover (500ms)
 const MIN_SPEECH_FRAMES = 4;   // ~120ms minimum to avoid transcribing tiny noise bursts
-const MAX_SPEECH_MS = 15000;
+const MAX_SPEECH_MS = 14000;
 
 function rms(samples: Float32Array, start: number, end: number): number {
   let sum = 0;

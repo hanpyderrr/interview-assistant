@@ -17,6 +17,34 @@ import dns from "dns"
 import { SystemAudioHealthClassifier } from "./audio/systemAudioHealthClassifier.mjs"
 import { autoUpdater } from "electron-updater"
 
+/**
+ * Phase 18 Step 2 diagnostic-only, additive, backward-compatible payload.
+ * Never consumed for control flow. textLength only — never transcript text,
+ * a reversible hash, or any prefix/suffix of it.
+ */
+type NativeAudioTranscriptDiagnostics = {
+  sttSessionGeneration?: number;
+  hostDispatchMonotonicMs?: number;
+  workerQueueWaitMs?: number;
+  workerInferenceMs?: number;
+  hostRoundTripMs?: number;
+  mainEmitWallMs?: number;
+  textLength?: number;
+};
+
+type NativeAudioTranscriptPayload = {
+  speaker: string;
+  text: string;
+  timestamp: number;
+  final: boolean;
+  confidence: number;
+  segmentId?: number;
+  audioStartMs?: number;
+  audioEndMs?: number;
+  kind?: 'partial' | 'final' | 'reset';
+  diagnostics?: NativeAudioTranscriptDiagnostics;
+};
+
 // Override global dns.lookup to resolve macOS system resolver issues with api.natively.software
 const originalLookup = dns.lookup;
 dns.lookup = function(hostname: any, options: any, callback: any) {
@@ -45,6 +73,34 @@ dns.lookup = function(hostname: any, options: any, callback: any) {
 if (!app.isPackaged) {
   require('dotenv').config();
 }
+
+function configureStableUserDataPath(): void {
+  try {
+    if (process.env.NATIVELY_TEST_USERDATA) {
+      const testUserDataPath = path.resolve(process.env.NATIVELY_TEST_USERDATA);
+      fs.mkdirSync(testUserDataPath, { recursive: true });
+      app.setPath('userData', testUserDataPath);
+      console.log(`[Main] userData pinned by NATIVELY_TEST_USERDATA: ${app.getPath('userData')}`);
+      return;
+    }
+
+    if (!app.isPackaged) {
+      // Raw Electron launches default to an "Electron" profile on Windows,
+      // while the installed app and downloaded local models live under
+      // %APPDATA%/natively. Pin dev launches to the product profile so STT
+      // settings and Whisper models do not silently disappear.
+      const stableUserDataPath = path.join(app.getPath('appData'), 'natively');
+      fs.mkdirSync(stableUserDataPath, { recursive: true });
+      app.setPath('userData', stableUserDataPath);
+      app.setName('Natively');
+      console.log(`[Main] userData pinned for development: ${app.getPath('userData')}`);
+    }
+  } catch (err) {
+    console.warn('[Main] Failed to pin stable userData path:', (err as Error)?.message || err);
+  }
+}
+
+configureStableUserDataPath();
 
 // ============================================================================
 // FONTATIONS RENDERER-CRASH MITIGATION (2026-07-10) — user crash report on
@@ -1374,8 +1430,10 @@ export class AppState {
   private static readonly PARTIAL_TRANSCRIPT_THROTTLE_MS = 100;
   private _transcriptPartialThrottle = new Map<string, {
     timer: ReturnType<typeof setTimeout> | null;
-    pending: { speaker: string; text: string; timestamp: number; final: boolean; confidence: number } | null;
+    pending: NativeAudioTranscriptPayload | null;
   }>();
+  private _transcriptEventSequence = 0;
+  private _transcriptSessionId = 0;
   private _disguiseTimers: NodeJS.Timeout[] = []; // Track forceUpdate timeouts
   private _dockDebounceTimer: NodeJS.Timeout | null = null; // Debounce dock state changes
   private _dockReassertTimers: NodeJS.Timeout[] = []; // Self-verifying dock-enforcement retry timers
@@ -2149,10 +2207,23 @@ export class AppState {
   }
 
   /** Push a transcript payload to the launcher + overlay rolling-transcript bar. */
-  private emitTranscriptToSurfaces(payload: { speaker: string; text: string; timestamp: number; final: boolean; confidence: number }): void {
+  private emitTranscriptToSurfaces(payload: NativeAudioTranscriptPayload): void {
     const helper = this.getWindowHelper();
-    this.sendToWindow(helper.getLauncherWindow(), 'native-audio-transcript', payload);
-    this.sendToWindow(helper.getOverlayWindow(), 'native-audio-transcript', payload);
+    // Phase 18 Step 2: attach mainEmitWallMs to the carried diagnostics so
+    // renderer can materialize the main-emit boundary. Never record into a
+    // disconnected main-process-only store.
+    const mainEmitWallMs = Date.now();
+    const event = {
+      ...payload,
+      kind: payload.kind ?? (payload.final ? 'final' : 'partial'),
+      sequence: ++this._transcriptEventSequence,
+      sessionId: this._transcriptSessionId,
+      diagnostics: payload.diagnostics
+        ? { ...payload.diagnostics, mainEmitWallMs }
+        : { mainEmitWallMs },
+    };
+    this.sendToWindow(helper.getLauncherWindow(), 'native-audio-transcript', event);
+    this.sendToWindow(helper.getOverlayWindow(), 'native-audio-transcript', event);
   }
 
   /**
@@ -2162,7 +2233,7 @@ export class AppState {
    * chatty STT doesn't generate near-per-token IPC to two windows. Keyed per
    * speaker so interviewer + user channels throttle independently.
    */
-  private sendThrottledTranscript(payload: { speaker: string; text: string; timestamp: number; final: boolean; confidence: number }): void {
+  private sendThrottledTranscript(payload: NativeAudioTranscriptPayload): void {
     const key = payload.speaker;
     let state = this._transcriptPartialThrottle.get(key);
     if (!state) {
@@ -2198,6 +2269,14 @@ export class AppState {
       state.pending = null;
     }
     this._transcriptPartialThrottle.clear();
+    this.emitTranscriptToSurfaces({
+      speaker: 'system',
+      text: '',
+      timestamp: Date.now(),
+      final: false,
+      confidence: 1,
+      kind: 'reset',
+    });
   }
 
   private sendSttStatus(payload: any): void {
@@ -3127,7 +3206,7 @@ export class AppState {
     stt.setRecognitionLanguage(sttLanguage);
 
     // Wire Transcript Events
-    stt.on('transcript', (segment: { text: string, isFinal: boolean, confidence: number, speakerId?: string }) => {
+    stt.on('transcript', (segment: { text: string, isFinal: boolean, confidence: number, speakerId?: string, segmentId?: number, audioStartMs?: number, audioEndMs?: number, diagnostics?: NativeAudioTranscriptDiagnostics }) => {
       // Accept transcripts while a meeting is active OR while we're draining
       // trailing finals after Stop. `_isDraining` covers the ~250 ms grace
       // window between Stop click and STT socket close so the user's last
@@ -3164,7 +3243,13 @@ export class AppState {
         text: segment.text,
         timestamp: Date.now(),
         final: segment.isFinal,
-        confidence: segment.confidence
+        confidence: segment.confidence,
+        ...(typeof segment.segmentId === 'number' ? { segmentId: segment.segmentId } : {}),
+        ...(typeof segment.audioStartMs === 'number' ? { audioStartMs: segment.audioStartMs } : {}),
+        ...(typeof segment.audioEndMs === 'number' ? { audioEndMs: segment.audioEndMs } : {}),
+        // Phase 18 Step 2 diagnostic-only: additive, optional. Never consumed
+        // for control flow by any transcript/answer consumer.
+        ...(segment.diagnostics ? { diagnostics: segment.diagnostics } : {}),
       };
       // Display-only send, partial-throttled (finals pass through immediately).
       // The answer path above (handleTranscript / RAG feed) is unaffected.
@@ -4505,9 +4590,9 @@ export class AppState {
       // Mic first: lazy mic start constructs the cpal input stream; do it
       // before starting the CoreAudio system tap to avoid HAL contention.
       this.microphoneCapture?.start();
-      this.googleSTT_User?.start();
       this.systemAudioCapture?.start();
       this.googleSTT?.start();
+      this.googleSTT_User?.start();
     }
   }
 
@@ -4608,9 +4693,9 @@ export class AppState {
       // Mic first: lazy mic start constructs the cpal input stream; do it
       // before starting the CoreAudio system tap to avoid HAL contention.
       this.microphoneCapture?.start();
-      this.googleSTT_User?.start();
       this.systemAudioCapture?.start();
       this.googleSTT?.start();
+      this.googleSTT_User?.start();
     }
 
     console.log('[Main] STT Provider reconfigured');
@@ -5330,6 +5415,18 @@ export class AppState {
 
   public async startMeeting(metadata?: any): Promise<void> {
     console.log('[Main] Starting Meeting...', metadata);
+    if (this.isMeetingActive) {
+      console.warn('[Main] startMeeting() ignored — a meeting is already active.');
+      return;
+    }
+    const stayOnLauncher = metadata?.stayOnLauncher === true;
+
+    const configuredSttProvider = CredentialsManager.getInstance().getSttProvider();
+    if (configuredSttProvider === 'none') {
+      const error = new Error('Speech-to-text is not configured. Choose a provider in Settings > Audio before starting a meeting.') as Error & { code?: string };
+      error.code = 'stt-not-configured';
+      throw error;
+    }
 
     // If a previous endMeeting() is still draining STT in the background, wait
     // for it to finish before we boot a new session — otherwise the BG teardown
@@ -5344,6 +5441,7 @@ export class AppState {
       }
       this._pendingTeardown = null;
     }
+    this._transcriptSessionId += 1;
 
     // PR #173: Reset audio recovery state for fresh session
     this._systemAudioRecoveryInProgress = false;
@@ -5406,16 +5504,18 @@ export class AppState {
     // a predictable centered position regardless of where the previous
     // session left it. (Moved up from below so setWindowMode('overlay') reads
     // the reset bounds.)
-    this.windowHelper.resetOverlayPosition();
+    if (!stayOnLauncher) {
+      this.windowHelper.resetOverlayPosition();
 
-    // ─── WINDOW SWAP BEFORE STATE BROADCAST ───────────────────────────────
-    // Switch to the overlay BEFORE flipping `isMeetingActive` to true. If we
-    // broadcast meeting-state-changed:{isActive:true} while the launcher is
-    // still visible, the launcher's CTA pill briefly crossfades blue→green
-    // before the renderer's follow-up setWindowMode('overlay') hides it —
-    // visible as a flash. Switching first means the launcher hides before
-    // the state event arrives, so the user only ever sees the overlay.
-    this.windowHelper.setWindowMode('overlay');
+      // ─── WINDOW SWAP BEFORE STATE BROADCAST ───────────────────────────────
+      // Switch to the overlay BEFORE flipping `isMeetingActive` to true. If we
+      // broadcast meeting-state-changed:{isActive:true} while the launcher is
+      // still visible, the launcher's CTA pill briefly crossfades blue→green
+      // before the renderer's follow-up setWindowMode('overlay') hides it —
+      // visible as a flash. Switching first means the launcher hides before
+      // the state event arrives, so the user only ever sees the overlay.
+      this.windowHelper.setWindowMode('overlay');
+    }
 
     const meetingGeneration = ++this._meetingGeneration;
     this.isMeetingActive = true;
@@ -5571,13 +5671,15 @@ export class AppState {
           // `[Microphone] Device: ...`). Keep launch-time mic discipline by
           // staying lazy, but restore the pre-fix HAL ordering inside meetings.
           this.microphoneCapture?.start();
-          this.googleSTT_User?.start();
-          userSttStartedByInit = true;
 
-          // Start System Audio after the mic stream has been constructed.
+          // Give the interviewer/system channel the ONNX slot before the user
+          // channel so system audio has first crack at the shared worker pool.
           this.systemAudioCapture?.start();
           this.googleSTT?.start();
           systemSttStartedByInit = true;
+
+          this.googleSTT_User?.start();
+          userSttStartedByInit = true;
         } else {
           console.log('[Main] Ambient AI Chat enabled — skipping mic/system audio capture and STT for this session.');
         }

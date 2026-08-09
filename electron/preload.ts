@@ -13,6 +13,35 @@ interface DomCaptureMeta {
   firstLine?: string;
 }
 
+/**
+ * Phase 18 Step 2 diagnostic-only, additive, backward-compatible field.
+ * Never consumed for control flow. textLength only — never transcript text.
+ */
+type NativeAudioTranscriptDiagnostics = {
+  sttSessionGeneration?: number;
+  hostDispatchMonotonicMs?: number;
+  workerQueueWaitMs?: number;
+  workerInferenceMs?: number;
+  hostRoundTripMs?: number;
+  mainEmitWallMs?: number;
+  textLength?: number;
+};
+
+type NativeAudioTranscriptEvent = {
+  speaker: string;
+  text: string;
+  final: boolean;
+  kind: 'partial' | 'final' | 'reset';
+  sequence: number;
+  sessionId: number;
+  timestamp: number;
+  confidence: number;
+  segmentId?: number;
+  audioStartMs?: number;
+  audioEndMs?: number;
+  diagnostics?: NativeAudioTranscriptDiagnostics;
+};
+
 // Types for the exposed Electron API
 interface ElectronAPI {
   updateContentDimensions: (dimensions: { width: number; height: number }) => Promise<void>;
@@ -286,12 +315,14 @@ interface ElectronAPI {
     micModelId: string;
     systemModelId: string;
     globalModelId: string;
+    segmenterMode: 'baseline' | 'meetily-experiment';
   }>;
   localWhisperSetChannelConfig: (cfg: {
     enabled?: boolean;
     micModelId?: string;
     systemModelId?: string;
     globalModelId?: string;
+    segmenterMode?: 'baseline' | 'meetily-experiment';
   }) => Promise<{ success: boolean; error?: string }>;
   localWhisperDeleteModel: (modelId: string) => Promise<{ success: boolean; error?: string }>;
   localWhisperStartDownload: (modelId: string) => Promise<{ success: boolean; error?: string }>;
@@ -341,7 +372,7 @@ interface ElectronAPI {
 
   // Native Audio Service Events
   onNativeAudioTranscript: (
-    callback: (transcript: { speaker: string; text: string; final: boolean }) => void,
+    callback: (transcript: NativeAudioTranscriptEvent) => void,
   ) => () => void;
   onNativeAudioSuggestion: (
     callback: (suggestion: { context: string; lastQuestion: string; confidence: number }) => void,
@@ -1547,6 +1578,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     micModelId?: string;
     systemModelId?: string;
     globalModelId?: string;
+    segmenterMode?: 'baseline' | 'meetily-experiment';
   }) => ipcRenderer.invoke('local-whisper-set-channel-config', cfg),
   localWhisperDeleteModel: (modelId: string) =>
     ipcRenderer.invoke('local-whisper-delete-model', modelId),
@@ -1619,7 +1651,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Native Audio Service Events
   onNativeAudioTranscript: (
-    callback: (transcript: { speaker: string; text: string; final: boolean }) => void,
+    callback: (transcript: NativeAudioTranscriptEvent) => void,
   ) => {
     const subscription = (_: any, data: any) => callback(data);
     ipcRenderer.on('native-audio-transcript', subscription);
@@ -1806,6 +1838,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Meeting Lifecycle
   startMeeting: (metadata?: any) => ipcRenderer.invoke('start-meeting', metadata),
   endMeeting: () => ipcRenderer.invoke('end-meeting'),
+  retrieveInterviewKnowledge: (question: string) => ipcRenderer.invoke('interview:retrieve-knowledge', question),
   debugInjectTranscript: (segments: Array<{ speaker?: string; text: string; timestamp?: number; confidence?: number }>) =>
     ipcRenderer.invoke('debug-inject-transcript', segments),
   finalizeMicSTT: () => ipcRenderer.invoke('finalize-mic-stt'),

@@ -7194,16 +7194,23 @@ let isMultimodal = !!(imagePaths?.length);
     messages.push({ role: "user", content: userMessage });
 
     if (abortSignal?.aborted) return;
-    let stream;
+    // The OpenAI SDK does not type DeepSeek's provider-specific `thinking`
+    // extension, so keep the resulting stream dynamic at this compatibility
+    // boundary while the captured request remains covered by regression tests.
+    let stream: any;
     try {
       stream = await this.deepseekClient.chat.completions.create({
         model,
         messages,
         stream: true,
+        // DeepSeek V4 enables thinking by default. Interactive/live answers need
+        // visible text immediately; otherwise reasoning_content can consume the
+        // entire seven-second first-token budget before content starts.
+        thinking: { type: "disabled" },
         temperature: INTERACTIVE_TEMPERATURE,
         seed: INTERACTIVE_SEED, // DeepSeek is OpenAI-compatible and honors seed
         max_tokens: this.getDeepseekMaxOutput(model),
-      }, { signal: abortSignal });
+      } as any, { signal: abortSignal });
     } catch (err: any) {
       // Hard-trip on billing/quota/auth failures so we don't burn 3 chain rotations
       // re-attempting a 402 every few seconds. Mirrors Gemini's markRateCooled for

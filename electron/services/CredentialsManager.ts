@@ -9,13 +9,18 @@ import path from 'path';
 import * as crypto from 'crypto';
 import { deriveFallbackKey, encryptCredentialBlob, decryptCredentialBlob } from './credentialFallbackCrypto';
 
-const CREDENTIALS_PATH = path.join(app.getPath('userData'), 'credentials.enc');
-// App-managed AES fallback, used ONLY when the OS keyring (safeStorage) is
-// unavailable so keys still survive a restart. See credentialFallbackCrypto.ts for
-// the (honest) security posture: obfuscation-grade, machine-bound, never plaintext.
-const FALLBACK_PATH = path.join(app.getPath('userData'), 'credentials.fallback.enc');
-// Per-install random salt for the fallback key derivation (32 raw bytes, 0600).
-const SALT_PATH = path.join(app.getPath('userData'), 'credentials.salt');
+function getCredentialPaths(): { credentialsPath: string; fallbackPath: string; saltPath: string } {
+    const userDataPath = app.getPath('userData');
+    return {
+        credentialsPath: path.join(userDataPath, 'credentials.enc'),
+        // App-managed AES fallback, used ONLY when the OS keyring (safeStorage) is
+        // unavailable so keys still survive a restart. See credentialFallbackCrypto.ts for
+        // the (honest) security posture: obfuscation-grade, machine-bound, never plaintext.
+        fallbackPath: path.join(userDataPath, 'credentials.fallback.enc'),
+        // Per-install random salt for the fallback key derivation (32 raw bytes, 0600).
+        saltPath: path.join(userDataPath, 'credentials.salt'),
+    };
+}
 
 export interface CustomProvider {
     id: string;
@@ -859,17 +864,18 @@ export class CredentialsManager {
 
     public clearAll(): void {
         this.scrubMemory();
-        if (fs.existsSync(CREDENTIALS_PATH)) {
-            fs.unlinkSync(CREDENTIALS_PATH);
+        const { credentialsPath, saltPath } = getCredentialPaths();
+        if (fs.existsSync(credentialsPath)) {
+            fs.unlinkSync(credentialsPath);
         }
-        const plaintextPath = CREDENTIALS_PATH + '.json';
+        const plaintextPath = credentialsPath + '.json';
         if (fs.existsSync(plaintextPath)) {
             fs.unlinkSync(plaintextPath);
         }
         // App-managed fallback + its salt, and the cached derived key.
         this.removeFallbackFile();
         try {
-            if (fs.existsSync(SALT_PATH)) fs.unlinkSync(SALT_PATH);
+            if (fs.existsSync(saltPath)) fs.unlinkSync(saltPath);
         } catch (err) {
             console.warn('[CredentialsManager] Could not remove device salt:', err);
         }
@@ -931,10 +937,11 @@ export class CredentialsManager {
      * we must not regenerate a salt that would orphan a still-recoverable fallback.
      */
     private getOrCreateDeviceSalt(): Buffer {
-        if (fs.existsSync(SALT_PATH)) {
+        const { saltPath } = getCredentialPaths();
+        if (fs.existsSync(saltPath)) {
             let existing: Buffer;
             try {
-                existing = fs.readFileSync(SALT_PATH);
+                existing = fs.readFileSync(saltPath);
             } catch (err) {
                 // The salt file exists but we couldn't read it right now. Regenerating
                 // would permanently strand any existing encrypted fallback, so refuse.
@@ -945,9 +952,9 @@ export class CredentialsManager {
             // fall through to regenerate
         }
         const salt = crypto.randomBytes(32);
-        const tmp = SALT_PATH + '.tmp';
+        const tmp = saltPath + '.tmp';
         fs.writeFileSync(tmp, salt, { mode: 0o600 });
-        fs.renameSync(tmp, SALT_PATH);
+        fs.renameSync(tmp, saltPath);
         return salt;
     }
 
@@ -992,6 +999,7 @@ export class CredentialsManager {
      * to decide whether to warn.
      */
     private saveCredentials(): boolean {
+        const { credentialsPath, fallbackPath } = getCredentialPaths();
         // Try the OS keyring first. When safeStorage is available, this is the
         // preferred path. On Windows the underlying DPAPI can still throw after
         // isEncryptionAvailable() returns true (e.g. policy restrictions, roaming
@@ -1002,9 +1010,9 @@ export class CredentialsManager {
             if (safeStorage.isEncryptionAvailable()) {
                 const data = JSON.stringify(this.credentials);
                 const encrypted = safeStorage.encryptString(data);
-                const tmpEnc = CREDENTIALS_PATH + '.tmp';
+                const tmpEnc = credentialsPath + '.tmp';
                 fs.writeFileSync(tmpEnc, encrypted);
-                fs.renameSync(tmpEnc, CREDENTIALS_PATH);
+                fs.renameSync(tmpEnc, credentialsPath);
                 // Keyring is the source of truth now — drop any stale fallback file.
                 this.removeFallbackFile();
                 return true;
@@ -1022,9 +1030,9 @@ export class CredentialsManager {
         // credentialFallbackCrypto.ts) but never plaintext at rest.
         try {
             const blob = encryptCredentialBlob(JSON.stringify(this.credentials), this.getFallbackKey());
-            const tmpFb = FALLBACK_PATH + '.tmp';
+            const tmpFb = fallbackPath + '.tmp';
             fs.writeFileSync(tmpFb, blob, { mode: 0o600 });
-            fs.renameSync(tmpFb, FALLBACK_PATH);
+            fs.renameSync(tmpFb, fallbackPath);
             // Stale keyring file is now out of sync (the fallback has the latest
             // credentials). Remove it so loadCredentials() does not find it on
             // next startup and treat the old keyring data as authoritative —
@@ -1042,8 +1050,9 @@ export class CredentialsManager {
     /** Remove the app-managed fallback file (best-effort). */
     private removeFallbackFile(): void {
         try {
-            if (fs.existsSync(FALLBACK_PATH)) {
-                fs.unlinkSync(FALLBACK_PATH);
+            const { fallbackPath } = getCredentialPaths();
+            if (fs.existsSync(fallbackPath)) {
+                fs.unlinkSync(fallbackPath);
             }
         } catch (err) {
             console.warn('[CredentialsManager] Could not remove fallback credential file:', err);
@@ -1059,8 +1068,9 @@ export class CredentialsManager {
      */
     private removeKeyringFile(): void {
         try {
-            if (fs.existsSync(CREDENTIALS_PATH)) {
-                fs.unlinkSync(CREDENTIALS_PATH);
+            const { credentialsPath } = getCredentialPaths();
+            if (fs.existsSync(credentialsPath)) {
+                fs.unlinkSync(credentialsPath);
                 console.log('[CredentialsManager] Removed keyring credential file');
             }
         } catch (err) {
@@ -1070,7 +1080,8 @@ export class CredentialsManager {
 
     /** Remove any leftover legacy plaintext credential file (security invariant). */
     private removePlaintextFile(): void {
-        const plaintextPath = CREDENTIALS_PATH + '.json';
+        const { credentialsPath } = getCredentialPaths();
+        const plaintextPath = credentialsPath + '.json';
         if (fs.existsSync(plaintextPath)) {
             try {
                 fs.unlinkSync(plaintextPath);
@@ -1083,6 +1094,7 @@ export class CredentialsManager {
 
     private loadCredentials(): void {
         try {
+            const { credentialsPath, fallbackPath } = getCredentialPaths();
             // 1) Encrypted keyring file is authoritative when the keyring is available.
             //    However, if a previous saveCredentials() hit the fallback path AND the
             //    stale-keyring cleanup failed (rare — locked file, permissions, etc.),
@@ -1104,14 +1116,14 @@ export class CredentialsManager {
             //          cross-machine fallback cannot decrypt anyway).
             //    Both edge cases are bounded and recoverable; the worst outcome is a
             //    single re-entry of the affected credential.
-            if (fs.existsSync(CREDENTIALS_PATH)) {
+            if (fs.existsSync(credentialsPath)) {
                 let keyringAvailable = false;
                 try { keyringAvailable = safeStorage.isEncryptionAvailable(); } catch { keyringAvailable = false; }
 
-                if (keyringAvailable && fs.existsSync(FALLBACK_PATH)) {
+                if (keyringAvailable && fs.existsSync(fallbackPath)) {
                     try {
-                        const keyringMtime = fs.statSync(CREDENTIALS_PATH).mtimeMs;
-                        const fallbackMtime = fs.statSync(FALLBACK_PATH).mtimeMs;
+                        const keyringMtime = fs.statSync(credentialsPath).mtimeMs;
+                        const fallbackMtime = fs.statSync(fallbackPath).mtimeMs;
                         // The fallback's mtime reflects the LAST time a saveCredentials()
                         // completed its atomic rename. If the keyring is older than the
                         // fallback, the only way that can happen on a healthy machine is
@@ -1141,8 +1153,8 @@ export class CredentialsManager {
                     }
                 }
 
-                if (keyringAvailable && fs.existsSync(CREDENTIALS_PATH)) {
-                    const encrypted = fs.readFileSync(CREDENTIALS_PATH);
+                if (keyringAvailable && fs.existsSync(credentialsPath)) {
+                    const encrypted = fs.readFileSync(credentialsPath);
                     const decrypted = safeStorage.decryptString(encrypted);
                     try {
                         const parsed = JSON.parse(decrypted);
@@ -1167,9 +1179,9 @@ export class CredentialsManager {
             }
 
             // 2) App-managed encrypted fallback.
-            if (fs.existsSync(FALLBACK_PATH)) {
+            if (fs.existsSync(fallbackPath)) {
                 try {
-                    const blob = fs.readFileSync(FALLBACK_PATH);
+                    const blob = fs.readFileSync(fallbackPath);
                     const decrypted = decryptCredentialBlob(blob, this.getFallbackKey());
                     const parsed = JSON.parse(decrypted);
                     if (typeof parsed === 'object' && parsed !== null) {

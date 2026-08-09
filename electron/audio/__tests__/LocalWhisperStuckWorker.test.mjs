@@ -107,7 +107,7 @@ test('source: worker exit handler resets streaming state and emits an error', ()
   // 'exit' handler exists and resets in-flight streaming state.
   assert.match(
     source,
-    /this\.worker\.on\(\s*['"]exit['"]/,
+    /(?:this\.)?worker\.on\(\s*['"]exit['"]/,
     'worker.on("exit", …) handler must be present',
   );
   // Walk the exit handler body with a brace counter so nested blocks
@@ -116,16 +116,12 @@ test('source: worker exit handler resets streaming state and emits an error', ()
   // naive non-greedy match would slice off the emit and miss the assertion.
   const exitBlock = extractHandlerBody(source, 'exit');
   assert.ok(exitBlock, 'exit handler body must be locatable');
-  assert.match(
-    exitBlock,
-    /streamingTaskInFlight\s*=\s*false/,
-    'exit handler must clear streamingTaskInFlight',
-  );
-  assert.match(
-    exitBlock,
-    /this\.emit\(\s*['"]error['"]/,
-    'exit handler must emit an error event so the renderer can surface it',
-  );
+  assert.match(exitBlock, /this\.handleWorkerFailure\(\s*worker,\s*sessionId,/);
+  const failureStart = source.indexOf('    private handleWorkerFailure(');
+  const failureEnd = source.indexOf('    private attachWorkerListeners(', failureStart);
+  const failureSource = source.slice(failureStart, failureEnd);
+  assert.match(failureSource, /this\.stopStreamingLoop\(\)/);
+  assert.match(failureSource, /this\.emit\(\s*['"]error['"]/);
 });
 
 test('source: worker error handler also resets streaming in-flight state', () => {
@@ -133,16 +129,32 @@ test('source: worker error handler also resets streaming in-flight state', () =>
   // Guard the fix is still in place after future refactors.
   const errorBlock = extractHandlerBody(source, 'error');
   assert.ok(errorBlock, 'error handler body must be locatable');
-  assert.match(
-    errorBlock,
-    /streamingTaskInFlight\s*=\s*false/,
-    'error handler must clear streamingTaskInFlight (the fix the bug regressed without)',
+  assert.match(errorBlock, /this\.handleWorkerFailure\(\s*worker,\s*sessionId,/);
+  const failureStart = source.indexOf('    private handleWorkerFailure(');
+  const failureEnd = source.indexOf('    private attachWorkerListeners(', failureStart);
+  const failureSource = source.slice(failureStart, failureEnd);
+  assert.match(failureSource, /this\.stopStreamingLoop\(\)/);
+  assert.match(failureSource, /drainingFinalsInFlight\s*=\s*0/);
+});
+
+test('source: process worker failures invalidate the worker and drain queues', () => {
+  const errorBlock = extractHandlerBody(source, 'error');
+  const exitBlock = extractHandlerBody(source, 'exit');
+  assert.ok(errorBlock, 'error handler body must be locatable');
+  assert.ok(exitBlock, 'exit handler body must be locatable');
+  assert.match(source, /private\s+handleWorkerFailure\s*\(/, 'a shared worker-failure cleanup path must exist');
+  for (const block of [errorBlock, exitBlock]) {
+    assert.match(block, /this\.handleWorkerFailure\(\s*worker,\s*sessionId,/, 'process failures must use the shared cleanup path');
+  }
+  const failureBlock = source.match(
+    /private\s+handleWorkerFailure\s*\([^)]*\)\s*:\s*void\s*\{([\s\S]*?)\n\s{4}\}/,
   );
-  assert.match(
-    errorBlock,
-    /streamingTaskId\s*=\s*null/,
-    'error handler must clear streamingTaskId (taskId guard relies on null)',
-  );
+  assert.ok(failureBlock, 'worker-failure cleanup body must be locatable');
+  assert.match(failureBlock[1], /this\.isActive\s*=\s*false/);
+  assert.match(failureBlock[1], /this\.pendingAudio\s*=\s*\[\]/);
+  assert.match(failureBlock[1], /this\.finalTaskMetadata\.clear\(\)/);
+  assert.match(failureBlock[1], /this\.drainingFinalsInFlight\s*=\s*0/);
+  assert.match(failureBlock[1], /this\.beginWorkerTermination\(worker, true\)/);
 });
 
 test('source: streamingTick arms the watchdog in the dispatch path', () => {
@@ -214,7 +226,7 @@ test('behavioral: instance constructs without throwing when worker is dead', () 
  */
 function extractHandlerBody(source, eventName) {
   const re = new RegExp(
-    `this\\.worker\\.on\\(\\s*['"]${eventName}['"]\\s*,`,
+    `(?:this\\.)?worker\\.on\\(\\s*['"]${eventName}['"]\\s*,`,
   );
   const match = re.exec(source);
   if (!match) return null;

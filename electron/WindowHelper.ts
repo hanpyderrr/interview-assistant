@@ -46,8 +46,17 @@ function traceOverlayResize(event: string, data: Record<string, unknown>): void 
 }
 
 const startUrl = isDev
-  ? 'http://localhost:5180'
-  : `file://${path.join(__dirname, '../../dist/index.html')}`;
+  ? 'http://localhost:5180/?interview=1'
+  : `file://${path.join(__dirname, '../../dist/index.html')}?interview=1`;
+
+function buildWindowUrl(baseUrl: string, windowName: string, params: Record<string, string | undefined> = {}): string {
+  const url = new URL(baseUrl);
+  url.searchParams.set('window', windowName);
+  for (const [key, value] of Object.entries(params)) {
+    if (value) url.searchParams.set(key, value);
+  }
+  return url.toString();
+}
 
 export class WindowHelper {
   private launcherWindow: BrowserWindow | null = null;
@@ -652,7 +661,11 @@ export class WindowHelper {
     const reviewOffSuffix = isDev && process.env.NATIVELY_DISABLE_DEV_REVIEW === '1' ? '&review=off' : '';
     if (reviewOffSuffix) console.warn('[LeakTest] NATIVELY_DISABLE_DEV_REVIEW=1 → dev review modal disabled');
 
-    const launcherUrl = `${startUrl}?window=launcher${noOrchSuffix}${isolationSuffix}${reviewOffSuffix}`;
+    const launcherUrl = buildWindowUrl(startUrl, 'launcher', {
+      noorch: noOrchSuffix ? '1' : undefined,
+      isolate: launcherIsolation || undefined,
+      review: reviewOffSuffix ? 'off' : undefined,
+    });
 
     this.launcherWindow
       .loadURL(launcherUrl)
@@ -862,7 +875,7 @@ export class WindowHelper {
       this.overlayWindow.setAlwaysOnTop(true, 'screen-saver');
     }
 
-    this.overlayWindow.loadURL(`${startUrl}?window=overlay`).catch((e) => {
+    this.overlayWindow.loadURL(buildWindowUrl(startUrl, 'overlay')).catch((e) => {
       console.error('[WindowHelper] Failed to load Overlay URL:', e);
     });
 
@@ -1607,7 +1620,7 @@ export class WindowHelper {
       } else if (process.platform === 'win32') {
         win.setAlwaysOnTop(true, 'screen-saver');
       }
-      win.loadURL(`${startUrl}?window=${name}`).catch((e) => {
+      win.loadURL(buildWindowUrl(startUrl, name)).catch((e) => {
         console.error(`[WindowHelper] Failed to load ${name} URL:`, e);
       });
       this.attachRendererDiagnostics(win, name);

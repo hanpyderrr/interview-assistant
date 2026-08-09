@@ -22,6 +22,17 @@ export type WhisperModelId =
   | 'onnx-community/moonshine-tiny-ONNX'
   | 'onnx-community/moonshine-base-ONNX';
 
+export type LocalWhisperSegmenterMode = 'baseline' | 'meetily-experiment';
+
+export interface SpeechSegment {
+  samples: Float32Array;
+  durationMs: number;
+  sequenceId?: number;
+  startMs?: number;
+  endMs?: number;
+  confidence?: number;
+}
+
 export type WhisperModelStatus = 'available' | 'missing' | 'downloading' | 'error';
 
 export interface WhisperModelInfo {
@@ -93,9 +104,23 @@ export interface WorkerSetPromptMessage {
 }
 export type WorkerInMessage = WorkerInitMessage | WorkerTranscribeMessage | WorkerSetPromptMessage;
 
+/**
+ * Phase 18 Step 2 diagnostic-only, additive, backward-compatible payload.
+ * Never consumed for control flow — a missing/malformed diagnostics object
+ * must not change transcription behavior. Carries worker-local monotonic
+ * durations only (queue-wait/inference), computed from performance.now()
+ * endpoints within the worker; never a cross-clock (host/main/renderer)
+ * subtraction. textLength only — never transcript text.
+ */
+export interface WorkerTranscribeDiagnostics {
+  workerQueueWaitMs?: number;
+  workerInferenceMs?: number;
+  textLength?: number;
+}
+
 export interface WorkerReadyResponse { type: 'ready'; }
-export interface WorkerResultResponse { type: 'result'; taskId: string; text: string; }
-export interface WorkerPartialResponse { type: 'partial'; taskId: string; text: string; }
+export interface WorkerResultResponse { type: 'result'; taskId: string; text: string; diagnostics?: WorkerTranscribeDiagnostics; }
+export interface WorkerPartialResponse { type: 'partial'; taskId: string; text: string; diagnostics?: WorkerTranscribeDiagnostics; }
 export interface WorkerErrorResponse { type: 'error'; taskId?: string; message: string; }
 export interface WorkerProgressResponse { type: 'progress'; modelId: string; progress: number; }
 export type WorkerOutMessage =

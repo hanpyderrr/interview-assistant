@@ -223,9 +223,12 @@ export const useShortcuts = () => {
 
     // Load from Main Process on mount
     useEffect(() => {
+        const api = window.electronAPI;
+        if (!api?.getKeybinds || !api?.onKeybindsUpdate) return;
+
         const fetchKeybinds = async () => {
             try {
-                const keybinds = await window.electronAPI.getKeybinds();
+                const keybinds = await api.getKeybinds();
                 mapBackendToFrontend(keybinds);
             } catch (error) {
                 console.error('Failed to fetch keybinds:', error);
@@ -235,7 +238,7 @@ export const useShortcuts = () => {
         fetchKeybinds();
 
         // Listen for updates
-        const unsubscribe = window.electronAPI.onKeybindsUpdate((keybinds) => {
+        const unsubscribe = api.onKeybindsUpdate((keybinds) => {
             mapBackendToFrontend(keybinds);
         });
 

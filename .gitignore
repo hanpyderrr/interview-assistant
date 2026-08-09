@@ -467,6 +467,9 @@ docs/*
 !docs/VISION_MODEL_BENCHMARK.md
 benchmark-results/
 
+# Runtime browser state and credentials — never commit
+# (includes codex-replay-userdata/, credentials.enc, Cookies, natively.db*)
+/session-live/
 
 # Role Insight visual harness — generated artifacts (regenerate with
 # `electron scripts/dump-role-insight-fixture.mjs` + `node scripts/role-insight-harness/build.mjs`)
@@ -475,3 +478,28 @@ benchmark-results/
 
 # Unbuilt feature PRDs — planning documents, never shipped to the public repo
 /upcoming/
+
+# Local interview-assistant development artifacts
+/$wtRoot/
+/backups/
+/session-output/
+/session-output-utf8/
+/session-smoke/
+/ui-smoke.png
+/reports/
+/knowledge_source/*
+!/knowledge_source/README.md
+!/knowledge_source/embedded_kb.example.jsonl
+/realtime_audio/__pycache__/
+/realtime_audio/session-live/
+/realtime_audio/session-output/
+/realtime_audio/session-output-utf8/
+/realtime_audio/session-replay/
+
+# Keep the project handoff and the active implementation plan in private forks.
+!docs/PROJECT_STATUS_2026-08-08.md
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/plans/
+docs/superpowers/plans/*
+!docs/superpowers/plans/2026-08-08-question-round-aggregation.md

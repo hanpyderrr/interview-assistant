@@ -14,7 +14,7 @@
  *   profile (see resolveStreamingProfile):
  *
  *   Whisper / Distil-Whisper path (slow, batch-architected models):
- *     - Tick every 1500ms while a segment is open (after 800ms of audio)
+ *     - Tick every 1000ms while a segment is open (after 500ms of audio)
  *     - Apply LocalAgreement-2: only commit text where two overlapping
  *       inferences agree (longest common prefix). Stabilizes flicker.
  *     - First interim emit ~1.5–2.5s after speech starts.
@@ -35,13 +35,41 @@ import { EventEmitter } from 'events';
 import { Worker } from 'worker_threads';
 import { resampleToF32 } from './whisper/audioResampler';
 import { VadProcessor } from './whisper/vadProcessor';
+import { MeetilyVadProcessor, MEETILY_VAD_DEFAULTS } from './whisper/meetilyVadProcessor';
 import { filterHallucination } from './whisper/hallucinationFilter';
 import { configureTransformersCache } from './whisper/modelManager';
 import { clearLoadSentinel, modelPreloader, writeLoadSentinel } from './whisper/modelPreloader';
 import { buildWorkerInitMessage } from './whisper/inferenceConfig';
 import { resolveWhisperWorkerPath } from './whisper/workerPathResolver';
-import type { WorkerOutMessage } from './whisper/types';
-import { acquireOnnxSlot, hasEnoughMemoryForOnnxSession, getMinFreeGBForOnnxSession } from '../utils/onnxThreadConfig';
+import type { LocalWhisperSegmenterMode, SpeechSegment, WorkerOutMessage } from './whisper/types';
+import { acquireOnnxSlot, hasEnoughMemoryForOnnxSession, getMinFreeGBForOnnxSession, getOnnxGateSnapshot } from '../utils/onnxThreadConfig';
+import { RECOGNITION_LANGUAGES } from '../config/languages';
+import { SettingsManager } from '../services/SettingsManager';
+
+type Segmenter = {
+    push: (samples: Float32Array) => SpeechSegment[];
+    peekOpenSegment: () => { samples: Float32Array; durationMs: number } | null;
+    softCommit: () => SpeechSegment | null;
+    flush: () => SpeechSegment[];
+    reset: () => void;
+    isInSpeech: () => boolean;
+    currentSegmentId: () => number;
+    notifySpeechEnded?: () => SpeechSegment[];
+};
+
+type FinalSegmentMetadata = {
+    sessionId: number;
+    sequenceId: number;
+    startMs: number;
+    endMs: number;
+    hostDispatchMonotonicMs?: number;
+    confidence?: number;
+};
+
+type PendingFinal = {
+    audio: Float32Array;
+    metadata: FinalSegmentMetadata;
+};
 
 export class LocalWhisperSTT extends EventEmitter {
     private readonly modelId: string;
@@ -82,7 +110,12 @@ export class LocalWhisperSTT extends EventEmitter {
     // when both LocalWhisperSTT instances run the same model.
     private channelLabel = '';
     private worker: Worker | null = null;
-    private vad: VadProcessor | null = null;
+    private vad: Segmenter | null = null;
+    private segmenterMode: LocalWhisperSegmenterMode = 'baseline';
+    private sessionGeneration = 0;
+    private sessionAudioMs = 0;
+    private segmentSequence = 0;
+    private segmenterFallbackLogged = false;
     private isActive = false;
     // Cross-loader ONNX gate slot. Acquired in spawnWorker() before posting
     // init; released in worker error/exit handlers so other ONNX consumers
@@ -97,16 +130,23 @@ export class LocalWhisperSTT extends EventEmitter {
     // Pending audio waiting for the worker to become ready. Always finals —
     // streaming partials are never queued (they're best-effort and only fire
     // while a segment is open AND the worker is ready).
-    private pendingAudio: Float32Array[] = [];
+    private pendingAudio: PendingFinal[] = [];
+    private finalTaskMetadata = new Map<string, FinalSegmentMetadata>();
+    // Phase 18 Step 2 diagnostic-only: host-local performance.now() dispatch
+    // stamp per final taskId, used to compute a same-host round-trip
+    // duration when the worker's result returns. Never mixed with the
+    // worker's own (separate-clock) internal timings.
+    private finalDispatchedAt = new Map<string, number>();
 
     // Gap-flush: ensures a segment closes even if Rust SilenceSuppressor
     // stops sending audio before VAD's hangover completes.
     private gapFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    private speechEndedFlushTimer: ReturnType<typeof setTimeout> | null = null;
     private static readonly GAP_FLUSH_MS = 400;
-    // 5s grace timer for the previous worker to finish in-flight transcribes
-    // before we terminate it. Tracked so rapid stop/start cycles or app quit
-    // don't pin the event loop with stale termination timers.
-    private workerTerminateTimer: ReturnType<typeof setTimeout> | null = null;
+    // Each worker owns its termination timer. A single shared timer can be
+    // overwritten by a rapid stop/start cycle, leaving an older worker alive
+    // while its ONNX slot has already been released.
+    private workerTerminateTimers = new Map<Worker, ReturnType<typeof setTimeout>>();
 
     // Streaming inference loop state.
     // Self-chaining setTimeout (not setInterval) so the delay can adapt at
@@ -177,12 +217,18 @@ export class LocalWhisperSTT extends EventEmitter {
         if (modelId.toLowerCase().includes('moonshine')) {
             return { intervalMs: 750, minAudioMs: 400, skipAgreement: true };
         }
-        return { intervalMs: 1500, minAudioMs: 800, skipAgreement: false };
+        // Keep LocalAgreement-2 for Whisper stability, but start the first
+        // overlapping pass sooner. This only changes interim previews; final
+        // VAD segments still use the same full-segment transcription path.
+        return { intervalMs: 1000, minAudioMs: 500, skipAgreement: false };
     }
 
     setSampleRate(rate: number): void { this.inputSampleRate = rate; }
     setAudioChannelCount(_count: number): void {}
-    setRecognitionLanguage(key: string): void { this.language = key || 'auto'; }
+    setRecognitionLanguage(key: string): void {
+        const normalizedKey = key || 'auto';
+        this.language = RECOGNITION_LANGUAGES[normalizedKey]?.bcp47 ?? normalizedKey;
+    }
     setCredentials(_credPath: string): void {}
 
     /**
@@ -190,6 +236,89 @@ export class LocalWhisperSTT extends EventEmitter {
      * disambiguation when both LocalWhisperSTT instances use the same model.
      */
     setChannel(label: string): void { this.channelLabel = (label ?? '').trim(); }
+
+    private diagnosticLabel(): string {
+        const modelName = this.modelId.split('/').pop() || this.modelId;
+        const channelTag = this.channelLabel ? `:${this.channelLabel}` : '';
+        return `[LocalWhisperSTT/${modelName}${channelTag}]`;
+    }
+
+    private readSegmenterMode(): LocalWhisperSegmenterMode {
+        try {
+            return SettingsManager.getInstance().get('localWhisperSegmenter') === 'meetily-experiment'
+                ? 'meetily-experiment'
+                : 'baseline';
+        } catch {
+            return 'baseline';
+        }
+    }
+
+    private createSegmenter(mode: LocalWhisperSegmenterMode): Segmenter {
+        return mode === 'meetily-experiment'
+            ? new MeetilyVadProcessor()
+            : new VadProcessor();
+    }
+
+    private clearSpeechEndedFlushTimer(): void {
+        if (this.speechEndedFlushTimer) {
+            clearTimeout(this.speechEndedFlushTimer);
+            this.speechEndedFlushTimer = null;
+        }
+    }
+
+    private handleSegmenterFailure(error: unknown): void {
+        if (!this.segmenterFallbackLogged) {
+            this.segmenterFallbackLogged = true;
+            console.warn(`${this.diagnosticLabel()} segmenter failed; falling back to baseline`, {
+                mode: this.segmenterMode,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+        this.segmenterMode = 'baseline';
+        this.vad = new VadProcessor();
+    }
+
+    private pushSegmentsWithFallback(samples: Float32Array): SpeechSegment[] {
+        if (!this.vad) return [];
+        try {
+            return this.vad.push(samples);
+        } catch (error) {
+            this.handleSegmenterFailure(error);
+            return this.vad?.push(samples) ?? [];
+        }
+    }
+
+    private flushSegmentsWithFallback(): SpeechSegment[] {
+        if (!this.vad) return [];
+        try {
+            return this.vad.flush();
+        } catch (error) {
+            this.handleSegmenterFailure(error);
+            return this.vad?.flush() ?? [];
+        }
+    }
+
+    private normalizeSegment(segment: SpeechSegment): FinalSegmentMetadata {
+        const endMs = typeof segment.endMs === 'number' ? segment.endMs : this.sessionAudioMs;
+        const startMs = typeof segment.startMs === 'number'
+            ? segment.startMs
+            : Math.max(0, endMs - segment.durationMs);
+        const sequenceId = typeof segment.sequenceId === 'number'
+            ? segment.sequenceId
+            : ++this.segmentSequence;
+        this.segmentSequence = Math.max(this.segmentSequence, sequenceId);
+        return {
+            sessionId: this.sessionGeneration,
+            sequenceId,
+            startMs,
+            endMs,
+            ...(typeof segment.confidence === 'number' ? { confidence: segment.confidence } : {}),
+        };
+    }
+
+    private dispatchSegment(segment: SpeechSegment): void {
+        this.dispatchFinal(segment.samples, this.normalizeSegment(segment));
+    }
 
     /**
      * Set a context-biasing prompt (proper nouns, jargon, attendee names).
@@ -217,11 +346,29 @@ export class LocalWhisperSTT extends EventEmitter {
 
     start(): void {
         if (this.isActive) return;
+        // A previous stop may still have an ONNX worker draining finals. A
+        // new session must not inherit that worker or its queued PCM; the
+        // previous session's tail is already outside the new session boundary.
+        const staleWorker = this.worker;
+        if (staleWorker) this.beginWorkerTermination(staleWorker, true);
+        if (this.pendingAudio.length > 0) {
+            console.warn(`${this.diagnosticLabel()} dropping stale pending finals before new session`, {
+                pendingFinals: this.pendingAudio.length,
+            });
+            this.pendingAudio = [];
+        }
+        const sessionId = ++this.sessionGeneration;
         this.isDrainingFinals = false;
         this.drainingFinalsInFlight = 0;
+        this.clearSpeechEndedFlushTimer();
+        this.segmenterMode = this.readSegmenterMode();
+        this.sessionAudioMs = 0;
+        this.segmentSequence = 0;
+        this.segmenterFallbackLogged = false;
         this.isActive = true;
-        this.vad = new VadProcessor();
-        this.spawnWorker().catch((err) => {
+        this.vad = this.createSegmenter(this.segmenterMode);
+        this.spawnWorker(sessionId).catch((err) => {
+            if (sessionId !== this.sessionGeneration) return;
             // Gate refusal or worker spawn failure (e.g. insufficient memory for
             // the ONNX session). There is NO retry path, so we must NOT leave a
             // live streaming loop + VAD churning with worker=null — that silently
@@ -238,7 +385,6 @@ export class LocalWhisperSTT extends EventEmitter {
             }
             this.vad = null;
             this.isActive = false;
-            this.workerReady = false;
             this.emit('error', err instanceof Error ? err : new Error(String(err)));
         });
         this.startStreamingLoop();
@@ -249,16 +395,17 @@ export class LocalWhisperSTT extends EventEmitter {
         this.isActive = false;
 
         this.stopStreamingLoop();
+        this.clearSpeechEndedFlushTimer();
         if (this.gapFlushTimer) {
             clearTimeout(this.gapFlushTimer);
             this.gapFlushTimer = null;
         }
 
         if (this.vad) {
-            const segs = this.vad.flush();
+            const segs = this.flushSegmentsWithFallback();
             this.vad = null;
             this.isDrainingFinals = true;
-            segs.forEach(s => this.dispatchFinal(s.samples));
+            segs.forEach(s => this.dispatchSegment(s));
         }
 
         this.resetAgreementState();
@@ -273,6 +420,8 @@ export class LocalWhisperSTT extends EventEmitter {
         this.segmentOpenedAt = 0;
         this.firstPartialEmittedForSegment = 0;
         this.trackedSegmentId = 0;
+        this.sessionAudioMs = 0;
+        this.segmentSequence = 0;
         this.latencyLogCounter = 0;
 
         const w = this.worker;
@@ -285,9 +434,11 @@ export class LocalWhisperSTT extends EventEmitter {
 
     write(chunk: Buffer): void {
         if (!this.isActive || !this.vad) return;
+        this.clearSpeechEndedFlushTimer();
         const f32 = resampleToF32(chunk, this.inputSampleRate);
-        const segs = this.vad.push(f32);
-        segs.forEach(s => this.dispatchFinal(s.samples));
+        const segs = this.pushSegmentsWithFallback(f32);
+        this.sessionAudioMs += (f32.length / 16000) * 1000;
+        segs.forEach(s => this.dispatchSegment(s));
 
         // Soft-commit: if a segment has grown past MAX_SEGMENT_MS, force a
         // final pass and start a new (tail-keep) segment. The softCommit
@@ -295,7 +446,7 @@ export class LocalWhisperSTT extends EventEmitter {
         const open = this.vad.peekOpenSegment();
         if (open && open.durationMs >= LocalWhisperSTT.MAX_SEGMENT_MS) {
             const committed = this.vad.softCommit();
-            if (committed) this.dispatchFinal(committed.samples);
+            if (committed) this.dispatchSegment(committed);
         }
 
         // Telemetry: re-stamp segmentOpenedAt whenever the open VAD segment
@@ -317,16 +468,35 @@ export class LocalWhisperSTT extends EventEmitter {
         this.gapFlushTimer = setTimeout(() => {
             this.gapFlushTimer = null;
             if (this.isActive && this.vad) {
-                const pending = this.vad.flush();
-                pending.forEach(s => this.dispatchFinal(s.samples));
+                const pending = this.flushSegmentsWithFallback();
+                pending.forEach(s => this.dispatchSegment(s));
             }
-        }, LocalWhisperSTT.GAP_FLUSH_MS);
+        }, this.segmenterMode === 'meetily-experiment'
+            ? MEETILY_VAD_DEFAULTS.redemptionMs + 100
+            : LocalWhisperSTT.GAP_FLUSH_MS);
     }
 
     finalize(): void {
         if (!this.isActive || !this.vad) return;
-        const segs = this.vad.flush();
-        segs.forEach(s => this.dispatchFinal(s.samples));
+        this.clearSpeechEndedFlushTimer();
+        const segs = this.flushSegmentsWithFallback();
+        segs.forEach(s => this.dispatchSegment(s));
+    }
+
+    notifySpeechEnded(): void {
+        if (!this.isActive || !this.vad) return;
+        if (this.segmenterMode === 'baseline') {
+            this.finalize();
+            return;
+        }
+        this.clearSpeechEndedFlushTimer();
+        this.speechEndedFlushTimer = setTimeout(() => {
+            this.speechEndedFlushTimer = null;
+            if (this.isActive && this.vad) {
+                const segments = this.flushSegmentsWithFallback();
+                segments.forEach(s => this.dispatchSegment(s));
+            }
+        }, MEETILY_VAD_DEFAULTS.redemptionMs + 100);
     }
 
     /* ──────────────── Streaming inference loop ──────────────── */
@@ -472,6 +642,7 @@ export class LocalWhisperSTT extends EventEmitter {
                     text: cleaned.trim(),
                     isFinal: false,
                     confidence: 0.7,
+                    ...(this.trackedSegmentId > 0 ? { segmentId: this.trackedSegmentId } : {}),
                 });
             }
             return;
@@ -494,6 +665,7 @@ export class LocalWhisperSTT extends EventEmitter {
                 text: this.lastEmittedText.trim(),
                 isFinal: false,
                 confidence: 0.7,
+                ...(this.trackedSegmentId > 0 ? { segmentId: this.trackedSegmentId } : {}),
             });
         }
     }
@@ -532,8 +704,7 @@ export class LocalWhisperSTT extends EventEmitter {
         const fmt = (s: number[]) => s.length === 0
             ? 'n=0'
             : `n=${s.length} p50=${this.percentile(s, 50)}ms p95=${this.percentile(s, 95)}ms p99=${this.percentile(s, 99)}ms`;
-        const channelTag = this.channelLabel ? `:${this.channelLabel}` : '';
-        console.log(`[LocalWhisperSTT/${this.modelId.split('/').pop()}${channelTag}] latency · first-partial: ${fmt(fp)} · final: ${fmt(fn)}`);
+        console.log(`${this.diagnosticLabel()} latency · first-partial: ${fmt(fp)} · final: ${fmt(fn)}`);
     }
 
     /** Snapshot for UI / IPC. */
@@ -572,23 +743,36 @@ export class LocalWhisperSTT extends EventEmitter {
 
     /* ──────────────── Final segment dispatch ──────────────── */
 
-    private dispatchFinal(audio: Float32Array): void {
-        if (!this.worker) return;
-
+    private dispatchFinal(audio: Float32Array, metadata: FinalSegmentMetadata): void {
+        // Preserve when the VAD final first entered the STT host. This remains
+        // unchanged if the worker is not ready and the final waits in pendingAudio.
+        metadata.hostDispatchMonotonicMs ??= performance.now();
         // A final pass closes the streaming window — clear agreement state so
         // the next segment starts clean.
         this.resetAgreementState();
         this.clearStreamingWatchdog();
         this.streamingTaskInFlight = false;
 
-        if (!this.workerReady) {
+        if (!this.worker || !this.workerReady) {
             const MAX_PENDING = 500;
             if (this.pendingAudio.length < MAX_PENDING) {
-                this.pendingAudio.push(audio.slice());
+                this.pendingAudio.push({ audio: audio.slice(), metadata });
+                console.log(`${this.diagnosticLabel()} final queued`, {
+                    samples: audio.length,
+                    pendingFinals: this.pendingAudio.length,
+                    workerPresent: !!this.worker,
+                    workerReady: this.workerReady,
+                });
             } else {
-                console.warn('[LocalWhisperSTT] Pending queue full — dropping oldest segment');
+                console.warn(`${this.diagnosticLabel()} Pending queue full — dropping oldest segment`);
                 this.pendingAudio.shift();
-                this.pendingAudio.push(audio.slice());
+                this.pendingAudio.push({ audio: audio.slice(), metadata });
+                console.log(`${this.diagnosticLabel()} final queued`, {
+                    samples: audio.length,
+                    pendingFinals: this.pendingAudio.length,
+                    workerPresent: !!this.worker,
+                    workerReady: this.workerReady,
+                });
             }
             return;
         }
@@ -596,32 +780,54 @@ export class LocalWhisperSTT extends EventEmitter {
         if (this.isDrainingFinals) {
             this.drainingFinalsInFlight++;
         }
-        this.sendTranscribe(audio, false);
+        console.log(`${this.diagnosticLabel()} final dispatch`, {
+            samples: audio.length,
+            pendingFinals: this.pendingAudio.length,
+            isDrainingFinals: this.isDrainingFinals,
+            sequenceId: metadata.sequenceId,
+        });
+        const taskId = `t${++this.taskCounter}`;
+        this.finalTaskMetadata.set(taskId, metadata);
+        this.stampFinalDispatch(taskId);
+        this.sendTranscribe(audio, false, taskId);
     }
 
-    private sendTranscribe(audio: Float32Array, streaming: boolean): void {
+    /** Stamp the actual worker-post time used only for same-host round-trip.
+     * The earlier VAD/STT-host arrival is retained in FinalSegmentMetadata. */
+    private stampFinalDispatch(taskId: string): void {
+        this.finalDispatchedAt.set(taskId, performance.now());
+    }
+
+    private sendTranscribe(audio: Float32Array, streaming: boolean, taskId?: string): void {
         if (!this.worker) return;
-        const taskId = `${streaming ? 's' : 't'}${++this.taskCounter}`;
+        const resolvedTaskId = taskId ?? `${streaming ? 's' : 't'}${++this.taskCounter}`;
         const copy = audio.slice();
         this.worker.postMessage(
-            { type: 'transcribe', taskId, audio: copy, language: this.language, streaming },
+            { type: 'transcribe', taskId: resolvedTaskId, audio: copy, language: this.language, streaming },
             [copy.buffer]
         );
     }
 
     /* ──────────────── Worker lifecycle ──────────────── */
 
-    private async spawnWorker(): Promise<void> {
+    private async spawnWorker(sessionId: number): Promise<void> {
         const warm = modelPreloader.takeWarmWorker(this.modelId);
         if (warm) {
-            console.log(`[LocalWhisperSTT] Using preloaded warm worker for ${this.modelId}`);
+            if (sessionId !== this.sessionGeneration) {
+                const release = (warm as any).__slotRelease;
+                if (typeof release === 'function') release();
+                warm.removeAllListeners();
+                void warm.terminate().catch(() => {});
+                return;
+            }
+            console.log(`${this.diagnosticLabel()} using preloaded warm worker`, { modelId: this.modelId });
             this.worker = warm;
             this.workerReady = true;
             // Inherit the slot release the preloader acquired. Both preloader
             // and our local listeners will call this — it's a no-op the
             // second time.
             this.slotRelease = (warm as any).__slotRelease ?? null;
-            this.attachWorkerListeners();
+            this.attachWorkerListeners(sessionId);
             this.flushPending();
             return;
         }
@@ -636,23 +842,74 @@ export class LocalWhisperSTT extends EventEmitter {
             );
         }
 
-        this.slotRelease = await acquireOnnxSlot('high');
+        const slotRequestedAt = performance.now();
+        console.log(`${this.diagnosticLabel()} onnx slot request`, {
+            priority: 'high',
+            snapshot: getOnnxGateSnapshot(),
+        });
+        const slotRelease = await acquireOnnxSlot('high');
+        if (sessionId !== this.sessionGeneration) {
+            slotRelease();
+            return;
+        }
+        this.slotRelease = slotRelease;
+        console.log(`${this.diagnosticLabel()} onnx slot acquired`, {
+            waitMs: Math.round(performance.now() - slotRequestedAt),
+            snapshot: getOnnxGateSnapshot(),
+        });
 
-        console.log(`[LocalWhisperSTT] Cold-starting worker for ${this.modelId}`);
+        console.log(`${this.diagnosticLabel()} worker spawn`, { modelId: this.modelId });
         const workerPath = resolveWhisperWorkerPath();
         writeLoadSentinel(this.modelId);
         this.worker = new Worker(workerPath);
-        this.attachWorkerListeners();
+        this.attachWorkerListeners(sessionId);
         this.worker.postMessage(buildWorkerInitMessage(this.modelId));
     }
 
-    private attachWorkerListeners(): void {
-        if (!this.worker) return;
+    private handleWorkerFailure(worker: Worker, sessionId: number, error: Error): void {
+        if (this.worker !== worker || this.sessionGeneration !== sessionId) return;
 
-        this.worker.on('message', (msg: WorkerOutMessage) => {
+        // A process-level worker failure is terminal for this STT instance.
+        // Drop state that could otherwise keep queueing audio behind a dead
+        // worker; the next meeting start creates a fresh session.
+        this.stopStreamingLoop();
+        this.clearSpeechEndedFlushTimer();
+        if (this.gapFlushTimer) {
+            clearTimeout(this.gapFlushTimer);
+            this.gapFlushTimer = null;
+        }
+        this.isActive = false;
+        this.vad = null;
+        this.pendingAudio = [];
+        this.finalTaskMetadata.clear();
+        this.finalDispatchedAt.clear();
+        this.isDrainingFinals = false;
+        this.drainingFinalsInFlight = 0;
+        this.workerReady = false;
+        modelPreloader.recordLoadFailure(this.modelId);
+
+        // Remove listeners before terminate() so a paired error/exit event
+        // cannot execute this cleanup twice. Slot release happens in the
+        // termination promise's finally block.
+        this.beginWorkerTermination(worker, true);
+        this.emit('error', error);
+    }
+
+    private attachWorkerListeners(sessionId: number): void {
+        const worker = this.worker;
+        if (!worker) return;
+
+        worker.on('message', (msg: WorkerOutMessage) => {
+            // A late event from a worker that has already been replaced must
+            // never mutate the replacement session's state.
+            if (this.worker !== worker || this.sessionGeneration !== sessionId) return;
             if (msg.type === 'ready') {
                 clearLoadSentinel(this.modelId);
                 this.workerReady = true;
+                console.log(`${this.diagnosticLabel()} worker ready`, {
+                    pendingFinals: this.pendingAudio.length,
+                    isDrainingFinals: this.isDrainingFinals,
+                });
                 this.flushPending();
                 return;
             }
@@ -673,6 +930,17 @@ export class LocalWhisperSTT extends EventEmitter {
                 }
                 this.handleStreamingPartial(msg.text);
             } else if (msg.type === 'result') {
+                const metadata = this.finalTaskMetadata.get(msg.taskId);
+                this.finalTaskMetadata.delete(msg.taskId);
+                // Phase 18 Step 2 diagnostic-only: host-local round trip,
+                // same-host performance.now() duration. Never mixed with the
+                // worker's own internal (separate-clock) timings.
+                const dispatchedAt = this.finalDispatchedAt.get(msg.taskId);
+                this.finalDispatchedAt.delete(msg.taskId);
+                const hostRoundTripMs = typeof dispatchedAt === 'number'
+                    ? Math.round(performance.now() - dispatchedAt)
+                    : undefined;
+                if (metadata && metadata.sessionId !== this.sessionGeneration) return;
                 const text = filterHallucination(msg.text);
                 if (text) {
                     if (this.segmentOpenedAt > 0) {
@@ -681,7 +949,28 @@ export class LocalWhisperSTT extends EventEmitter {
                             this.recordLatency(this.finalLatencies, dt);
                         }
                     }
-                    this.emit('transcript', { text, isFinal: true, confidence: 0.9 });
+                    this.emit('transcript', {
+                        text,
+                        isFinal: true,
+                        confidence: 0.9,
+                        ...(metadata ? {
+                            segmentId: metadata.sequenceId,
+                            audioStartMs: metadata.startMs,
+                            audioEndMs: metadata.endMs,
+                        } : {}),
+                        diagnostics: {
+                            sttSessionGeneration: this.sessionGeneration,
+                            // Phase 18 Step 2 fix: carry the actual dispatch-time
+                            // monotonic stamp (host clock) so the renderer can
+                            // materialize a genuine stt-dispatch boundary, not
+                            // just the derived round-trip duration.
+                            ...(typeof metadata?.hostDispatchMonotonicMs === 'number' ? { hostDispatchMonotonicMs: Math.round(metadata.hostDispatchMonotonicMs) } : {}),
+                            ...(msg.diagnostics?.workerQueueWaitMs !== undefined ? { workerQueueWaitMs: msg.diagnostics.workerQueueWaitMs } : {}),
+                            ...(msg.diagnostics?.workerInferenceMs !== undefined ? { workerInferenceMs: msg.diagnostics.workerInferenceMs } : {}),
+                            ...(hostRoundTripMs !== undefined ? { hostRoundTripMs } : {}),
+                            textLength: text.length,
+                        },
+                    });
                 }
                 // Reset segment timer regardless of emit (silent finals also close
                 // the segment). Next write() that opens a fresh VAD segment will
@@ -695,6 +984,7 @@ export class LocalWhisperSTT extends EventEmitter {
                 }
             } else if (msg.type === 'error') {
                 console.error('[LocalWhisperSTT] Worker error:', msg.message);
+                if (msg.taskId) this.finalTaskMetadata.delete(msg.taskId);
                 if (this.isDrainingFinals && msg.taskId?.startsWith('t')) {
                     this.drainingFinalsInFlight = Math.max(0, this.drainingFinalsInFlight - 1);
                     if (this.drainingFinalsInFlight === 0 && this.worker) {
@@ -723,56 +1013,29 @@ export class LocalWhisperSTT extends EventEmitter {
             }
         });
 
-        this.worker.on('error', (err) => {
-            // Reset all in-flight streaming state so a dead worker can never
-            // permanently pin streamingTaskInFlight=true (which would freeze
-            // the loop — symptom: transcription stops after 3-4 questions).
-            this.clearStreamingWatchdog();
-            this.streamingTaskInFlight = false;
-            this.streamingTaskId = null;
-            // Free the shared ONNX gate slot — Whisper's session is gone.
-            if (this.slotRelease) { this.slotRelease(); this.slotRelease = null; }
-            this.workerReady = false;
-            // Symmetric with the exit handler below: a worker `error` is
-            // followed by a non-zero `exit` in node:worker_threads, so the
-            // exit handler also calls recordLoadFailure. Calling here too is
-            // belt-and-braces for the theoretical error-without-exit case
-            // (e.g. a hard native abort that races the parent). Idempotent
-            // because recordLoadFailure only sets a map expiry, never clears.
-            modelPreloader.recordLoadFailure(this.modelId);
-            const isOnnxSymbolError = err.message.includes('Symbol not found')
+        worker.on('error', (err) => {
+            if (this.worker !== worker || this.sessionGeneration !== sessionId) return;
+            const processIsOnnxSymbolError = err.message.includes('Symbol not found')
                 || err.message.includes('to_chars')
                 || err.message.includes('libonnxruntime');
-            if (isOnnxSymbolError) {
-                this.emit('error', new Error(
-                    'Local Whisper is not supported on macOS 12 (Monterey) or earlier. Please upgrade to macOS 13 Ventura or later, or use a cloud STT provider.'
-                ));
-            } else {
-                this.emit('error', err);
-            }
+            const failure = processIsOnnxSymbolError
+                ? new Error('Local Whisper is not supported on macOS 12 (Monterey) or earlier. Please upgrade to macOS 13 Ventura or later, or use a cloud STT provider.')
+                : err;
+            this.handleWorkerFailure(worker, sessionId, failure);
         });
 
         // 'exit' fires whenever the worker terminates (voluntarily or not),
         // including the 'error' path above. If the worker is gone, the
         // streaming loop must be unblocked — otherwise streamingTaskInFlight
         // stays true and the next tick silently stalls forever.
-        this.worker.on('exit', (code) => {
-            if (code === 0) {
-                clearLoadSentinel(this.modelId);
-                return; // clean shutdown
-            }
-            modelPreloader.recordLoadFailure(this.modelId);
-            this.clearStreamingWatchdog();
-            if (this.slotRelease) { this.slotRelease(); this.slotRelease = null; }
-            const hadInFlight = this.streamingTaskInFlight;
-            this.streamingTaskInFlight = false;
-            this.streamingTaskId = null;
-            this.workerReady = false;
-            if (hadInFlight) {
-                this.emit('error', new Error(
-                    `Local Whisper worker exited unexpectedly (code=${code}) — transcription stream has been unblocked.`
-                ));
-            }
+        worker.on('exit', (code) => {
+            if (this.worker !== worker || this.sessionGeneration !== sessionId) return;
+            this.handleWorkerFailure(
+                worker,
+                sessionId,
+                new Error(`Local Whisper worker exited unexpectedly (code=${code}) — transcription has stopped; start a new session to recover.`),
+            );
+
         });
     }
 
@@ -781,33 +1044,69 @@ export class LocalWhisperSTT extends EventEmitter {
         // see the bias on their initial run (worker honors the latest cached
         // prompt for whichever transcribe arrives next).
         this.maybePushPromptToWorker();
-        const queued = this.pendingAudio.splice(0);
-        queued.forEach(audio => this.sendTranscribe(audio, false));
+        const queued = this.pendingAudio.splice(0).filter(({ metadata }) => metadata.sessionId === this.sessionGeneration);
+        queued.forEach(({ audio, metadata }) => {
+            if (this.isDrainingFinals) {
+                this.drainingFinalsInFlight++;
+            }
+            const taskId = `t${++this.taskCounter}`;
+            this.finalTaskMetadata.set(taskId, metadata);
+            // Phase 18 Step 2 fix: queued finals are posted to the worker
+            // here, not in dispatchFinal, so the host round-trip clock must
+            // be stamped at this actual dispatch point too — otherwise
+            // hostRoundTripMs is silently missing for every queued final.
+            this.stampFinalDispatch(taskId);
+            this.sendTranscribe(audio, false, taskId);
+        });
         if (this.isDrainingFinals && queued.length === 0 && this.drainingFinalsInFlight === 0 && this.worker) {
             this.beginWorkerTermination(this.worker);
         }
     }
 
-    private beginWorkerTermination(w: Worker): void {
-        this.worker = null;
-        this.workerReady = false;
-        this.isDrainingFinals = false;
-        this.drainingFinalsInFlight = 0;
-        // Free the shared ONNX gate slot on clean shutdown — the session's
-        // BFCArena is being torn down with the worker, so the slot can go.
-        if (this.slotRelease) { this.slotRelease(); this.slotRelease = null; }
-        // Reset the sent-prompt tracker: a future spawnWorker call will get a
-        // fresh worker with empty cache, so we must re-push on next ready.
-        this.contextPromptSentToWorker = '';
+    private beginWorkerTermination(w: Worker, immediate = false): void {
+        if (this.workerTerminateTimers.has(w)) return;
+
+        const isCurrentWorker = this.worker === w;
+        const release = isCurrentWorker ? this.slotRelease : null;
+        if (isCurrentWorker) {
+            this.worker = null;
+            this.workerReady = false;
+            this.isDrainingFinals = false;
+            this.drainingFinalsInFlight = 0;
+            this.finalTaskMetadata.clear();
+            this.slotRelease = null;
+            // Reset the sent-prompt tracker: a future spawnWorker call will
+            // get a fresh worker with empty cache.
+            this.contextPromptSentToWorker = '';
+        }
+
+        // No callbacks should run while the worker is in its grace window.
         w.removeAllListeners('message');
         w.removeAllListeners('error');
-        if (this.workerTerminateTimer) clearTimeout(this.workerTerminateTimer);
-        const t = setTimeout(() => {
-            this.workerTerminateTimer = null;
-            w.terminate();
+        w.removeAllListeners('exit');
+
+        const terminate = async (): Promise<void> => {
+            try {
+                await w.terminate();
+            } catch {
+                // The worker may already have exited; slot cleanup still
+                // needs to happen in the finally path.
+            } finally {
+                release?.();
+            }
+        };
+
+        if (immediate) {
+            void terminate();
+            return;
+        }
+
+        const timer = setTimeout(() => {
+            this.workerTerminateTimers.delete(w);
+            void terminate();
         }, 5000);
         // unref so the timer doesn't pin the Node event loop on app quit.
-        (t as any).unref?.();
-        this.workerTerminateTimer = t;
+        (timer as any).unref?.();
+        this.workerTerminateTimers.set(w, timer);
     }
 }

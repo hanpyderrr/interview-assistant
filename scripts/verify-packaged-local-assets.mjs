@@ -85,12 +85,16 @@ const REQUIRED_WORKER_FILES = [
   'dist-electron/electron/audio/whisper/whisperWorker.js',
 ];
 
-// Required native binaries for the packaged app (the asarUnpack globs must place
-// them under app.asar.unpacked). Checked in packaged mode only.
-const REQUIRED_UNPACKED_NATIVE = [
+// Required native binaries shared by every packaged platform. Platform-specific
+// entries are selected from the Resources layout in verifyPackaged().
+const REQUIRED_UNPACKED_NATIVE_COMMON = [
   'node_modules/better-sqlite3/build/Release/better_sqlite3.node',
   'node_modules/keytar/build/Release/keytar.node',
   'node_modules/onnxruntime-node/bin',
+];
+
+const REQUIRED_UNPACKED_NATIVE_BY_PLATFORM = {
+  darwin: [
   'node_modules/@img/sharp-darwin-arm64/lib',
   'node_modules/@img/sharp-libvips-darwin-arm64/lib',
   'node_modules/@img/sharp-darwin-x64/lib',
@@ -99,7 +103,16 @@ const REQUIRED_UNPACKED_NATIVE = [
   'node_modules/sqlite-vec-darwin-x64/vec0.dylib',
   'native-module/index.darwin-arm64.node',
   'native-module/index.darwin-x64.node',
-];
+  ],
+  win32: [
+    'node_modules/@img/sharp-win32-x64/lib',
+    'node_modules/sqlite-vec-windows-x64/vec0.dll',
+    'native-module/index.win32-x64-msvc.node',
+  ],
+  linux: [
+    'native-module/index.linux-x64-gnu.node',
+  ],
+};
 
 const errors = [];
 const notes = [];
@@ -163,7 +176,10 @@ function resolveResourcesDir(appArg) {
 
 function verifyPackaged(appArg) {
   console.log('[verify-packaged-local-assets] packaged mode:', appArg);
-  const resources = resolveResourcesDir(appArg);
+  const absApp = path.resolve(appArg);
+  const isMac = exists(path.join(absApp, 'Contents', 'Resources'));
+  const platform = isMac ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux';
+  const resources = resolveResourcesDir(absApp);
   if (!exists(resources)) {
     errors.push(`Could not locate Resources dir under: ${appArg}`);
     return;
@@ -178,7 +194,11 @@ function verifyPackaged(appArg) {
   }
 
   // Native binaries & modules that must be present in the packaged app.
-  for (const rel of REQUIRED_UNPACKED_NATIVE) {
+  const requiredNative = [
+    ...REQUIRED_UNPACKED_NATIVE_COMMON,
+    ...(REQUIRED_UNPACKED_NATIVE_BY_PLATFORM[platform] || []),
+  ];
+  for (const rel of requiredNative) {
     checkAny(unpacked, [rel], `unpacked native asset ${rel}`);
   }
 

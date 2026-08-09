@@ -8088,12 +8088,13 @@ export function initializeIpcHandlers(appState: AppState): void {
       micModelId: sm.get('localWhisperModelMic') ?? '',
       systemModelId: sm.get('localWhisperModelSystem') ?? '',
       globalModelId: sm.get('localWhisperModel') ?? '',
+      segmenterMode: sm.get('localWhisperSegmenter') === 'meetily-experiment' ? 'meetily-experiment' : 'baseline',
     };
   });
 
   safeHandle(
     'local-whisper-set-channel-config',
-    async (_, cfg: { enabled?: boolean; micModelId?: string; systemModelId?: string }) => {
+    async (_, cfg: { enabled?: boolean; micModelId?: string; systemModelId?: string; segmenterMode?: 'baseline' | 'meetily-experiment' }) => {
       try {
         const sm = SettingsManager.getInstance();
         const { MODEL_CATALOG_IDS } = require('./audio/whisper/modelManager');
@@ -8107,6 +8108,12 @@ export function initializeIpcHandlers(appState: AppState): void {
         if (typeof cfg?.micModelId === 'string') sm.set('localWhisperModelMic', cfg.micModelId);
         if (typeof cfg?.systemModelId === 'string')
           sm.set('localWhisperModelSystem', cfg.systemModelId);
+        if (typeof cfg?.segmenterMode === 'string') {
+          if (cfg.segmenterMode !== 'baseline' && cfg.segmenterMode !== 'meetily-experiment') {
+            return { success: false, error: 'Unknown local Whisper segmenter mode' };
+          }
+          sm.set('localWhisperSegmenter', cfg.segmenterMode);
+        }
         return { success: true };
       } catch (e: any) {
         return { success: false, error: e.message };
@@ -8688,6 +8695,44 @@ export function initializeIpcHandlers(appState: AppState): void {
       // renderer can surface a recoverable permissions prompt rather than a
       // silent failure. Falls back to undefined for plain errors.
       return { success: false, error: error?.message, code: error?.code };
+    }
+  });
+
+  safeHandle('interview:retrieve-knowledge', async (_event, question: unknown) => {
+    if (typeof question !== 'string' || !question.trim()) return { success: false, error: 'Question is empty' };
+    const normalizedQuestion = question.trim().slice(0, 1200);
+    try {
+      const candidates = [
+        path.join(app.getAppPath(), 'knowledge_source', 'embedded_kb.jsonl'),
+        path.join(process.cwd(), 'knowledge_source', 'embedded_kb.jsonl'),
+      ];
+      const kbPath = candidates.find((candidate) => fs.existsSync(candidate));
+      if (!kbPath) return { success: false, error: 'Interview knowledge base is unavailable' };
+      const entries = fs.readFileSync(kbPath, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+      const query = normalizedQuestion.toLowerCase().replace(/\s+/g, '');
+      const queryTerms: string[] = (query.match(/[a-z0-9_+#.-]{2,}/g) || [] as string[]).concat(
+        [...query.matchAll(/[\u4e00-\u9fff]{2,}/g)].flatMap((match) => {
+          const text = match[0];
+          return Array.from({ length: Math.max(0, text.length - 1) }, (_, index) => text.slice(index, index + 2));
+        }),
+      );
+      const matches = entries.map((entry: any) => {
+        const keywordText = `${entry.keywords?.join(' ') || ''} ${entry.title || ''} ${entry.content || ''}`.toLowerCase().replace(/\s+/g, '');
+        let score = 0;
+        for (const term of queryTerms) if (keywordText.includes(term)) score += entry.keywords?.some((keyword: string) => keyword.toLowerCase().includes(term)) ? 5 : 1;
+        if (entry.fact_status === 'resume_fact') score += 0.25;
+        return { entry, score };
+      }).filter(({ score }) => score > 0).sort((a, b) => b.score - a.score).slice(0, 5);
+      const context = matches.length
+        ? matches.map(({ entry, score }) => `[${entry.id}] ${entry.title} (score=${score.toFixed(2)}, source=${entry.fact_status})\n${entry.content}`).join('\n\n')
+        : 'No matching resume facts were found. Do not invent personal metrics; mark missing details for the candidate to fill in.';
+      return {
+        success: true,
+        context,
+        matches: matches.map(({ entry, score }) => ({ id: entry.id, title: entry.title, excerpt: entry.content, score, source: entry.fact_status })),
+      };
+    } catch (error: any) {
+      return { success: false, error: error?.message || 'Failed to read interview knowledge base' };
     }
   });
 

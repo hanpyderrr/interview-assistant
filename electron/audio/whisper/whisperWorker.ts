@@ -15,8 +15,16 @@
  * natively as a true dynamic ESM import at runtime.
  */
 import { parentPort } from 'worker_threads';
+import { performance } from 'node:perf_hooks';
 import { WhisperProgressAggregator } from './whisperProgressAggregator';
+import { createSerialAsyncQueue } from './serialAsyncQueue';
 import { getBoundedOnnxSessionOptions } from '../../utils/onnxThreadConfig';
+
+// Phase 18 Step 2 diagnostic telemetry only (see electron/telemetry/roundEvents.ts).
+// Worker-local monotonic clock: queue-wait/inference durations are computed
+// from worker-local performance.now() endpoints only, never subtracted
+// against host/main/renderer timestamps (different clock domains).
+const enqueuedAtByTaskId = new Map<string, number>();
 
 const LANG_MAP: Record<string, string | null> = {
   'auto': null,
@@ -130,7 +138,11 @@ async function loadTransformers(): Promise<{ pipeline: any; env: any }> {
   return (new Function('return import("@huggingface/transformers")')()) as any;
 }
 
-parentPort.on('message', async (msg: any) => {
+// Worker messages must be handled serially. `parentPort` invokes an async
+// listener again as soon as it reaches an await, so an overlapping partial and
+// final inference would otherwise execute against the same ONNX pipeline and
+// return results in completion order instead of audio order.
+const handleMessage = async (msg: any): Promise<void> => {
   if (msg.type === 'init') {
     // Validate required fields BEFORE entering the try/catch so the error
     // surfaces as a structured `error` postMessage rather than an unhandled
@@ -264,6 +276,13 @@ parentPort.on('message', async (msg: any) => {
       parentPort!.postMessage({ type: 'error', message: 'Model not loaded' });
       return;
     }
+    // Diagnostic-only: worker-local monotonic queue-wait, computed from the
+    // enqueue timestamp recorded when this message arrived (see bottom of
+    // file). Absence of a recorded enqueue time never blocks transcription.
+    const enqueuedAt = msg.taskId ? enqueuedAtByTaskId.get(msg.taskId) : undefined;
+    if (msg.taskId) enqueuedAtByTaskId.delete(msg.taskId);
+    const inferenceStartedAt = performance.now();
+    const queueWaitMs = typeof enqueuedAt === 'number' ? Math.round(inferenceStartedAt - enqueuedAt) : undefined;
     try {
       let language: string | null = LANG_MAP[msg.language] ?? null;
       const streaming: boolean = !!msg.streaming;
@@ -313,10 +332,19 @@ parentPort.on('message', async (msg: any) => {
       }
 
       const result = await pipe(msg.audio, opts);
+      const inferenceMs = Math.round(performance.now() - inferenceStartedAt);
+      const text = result.text ?? '';
       parentPort!.postMessage({
         type: streaming ? 'partial' : 'result',
         taskId: msg.taskId,
-        text: result.text ?? '',
+        text,
+        // Diagnostic-only, additive: never consumed for control flow by
+        // LocalWhisperSTT. textLength only — never send the text twice.
+        diagnostics: {
+          ...(queueWaitMs !== undefined ? { workerQueueWaitMs: queueWaitMs } : {}),
+          workerInferenceMs: inferenceMs,
+          textLength: text.length,
+        },
       });
     } catch (e: any) {
       parentPort!.postMessage({
@@ -326,4 +354,25 @@ parentPort.on('message', async (msg: any) => {
       });
     }
   }
+};
+
+const messageQueue = createSerialAsyncQueue<any>(
+  handleMessage,
+  (error, msg) => {
+    const message = error instanceof Error ? error.message : String(error);
+    parentPort!.postMessage({
+      type: 'error',
+      ...(msg?.taskId ? { taskId: msg.taskId } : {}),
+      message: `Worker message failed: ${message}`,
+    });
+  },
+);
+
+parentPort.on('message', (msg: any) => {
+  // Diagnostic-only: stamp the worker-local monotonic enqueue time for
+  // transcribe tasks so handleMessage can compute queue-wait later.
+  if (msg?.type === 'transcribe' && msg.taskId) {
+    enqueuedAtByTaskId.set(msg.taskId, performance.now());
+  }
+  messageQueue.enqueue(msg);
 });

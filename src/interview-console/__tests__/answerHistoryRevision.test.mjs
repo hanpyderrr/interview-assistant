@@ -1,0 +1,120 @@
+// Phase 18 Step 3 RED contract for the future answer-history `revise` action.
+//
+// This suite runs against the real reducer. It is expected to FAIL now because
+// `{ type: 'revise' }` is not implemented; the reducer's `default` branch
+// returns the state unchanged, so the question/status assertions below fail.
+// Do not implement the action here (Step 4 owns that).
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  answerHistoryReducer,
+  createAnswerHistoryState,
+} from '../answerHistory.ts';
+
+const ANSWER_ID = 4201;
+const FIRST_QUESTION = '你怎么设计 SPI 帧头？';
+const COMBINED_QUESTION = '你怎么设计 SPI 帧头？还有 CRC32 校验和半包怎么处理？';
+
+const HITS = [
+  { id: 'kb-1', title: 'SPI 帧协议', excerpt: '帧头 + 长度 + CRC32', score: 0.91 },
+];
+
+/** A round mid-generation: enqueued, started, streamed a visible draft, hits attached. */
+function stateWithVisibleDraft() {
+  let state = createAnswerHistoryState(10);
+  state = answerHistoryReducer(state, { type: 'enqueue', id: ANSWER_ID, question: FIRST_QUESTION });
+  state = answerHistoryReducer(state, { type: 'start', id: ANSWER_ID });
+  state = answerHistoryReducer(state, { type: 'hits', id: ANSWER_ID, hits: HITS });
+  state = answerHistoryReducer(state, { type: 'token', id: ANSWER_ID, token: '我会先约定字节序，' });
+  state = answerHistoryReducer(state, { type: 'token', id: ANSWER_ID, token: '再定义帧头。' });
+  return state;
+}
+
+const VISIBLE_DRAFT = '我会先约定字节序，再定义帧头。';
+
+test('revise keeps exactly one item and reuses the same answer id', () => {
+  const before = stateWithVisibleDraft();
+  assert.equal(before.items.length, 1);
+
+  const after = answerHistoryReducer(before, {
+    type: 'revise',
+    id: ANSWER_ID,
+    question: COMBINED_QUESTION,
+  });
+
+  assert.equal(after.items.length, 1, 'revise must not append a second history item');
+  assert.equal(after.items[0].id, ANSWER_ID, 'revise must reuse the existing answer id');
+  assert.equal(after.selectedId, ANSWER_ID);
+});
+
+test('revise updates the combined question text', () => {
+  const after = answerHistoryReducer(stateWithVisibleDraft(), {
+    type: 'revise',
+    id: ANSWER_ID,
+    question: COMBINED_QUESTION,
+  });
+
+  assert.equal(after.items[0].question, COMBINED_QUESTION);
+});
+
+test('revise retains the visible draft answer and the existing hits', () => {
+  const after = answerHistoryReducer(stateWithVisibleDraft(), {
+    type: 'revise',
+    id: ANSWER_ID,
+    question: COMBINED_QUESTION,
+  });
+
+  assert.equal(
+    after.items[0].answer,
+    VISIBLE_DRAFT,
+    'the old visible draft must stay on screen until fresh output arrives',
+  );
+  assert.deepEqual(after.items[0].hits, HITS, 'revise must retain previously attached hits');
+});
+
+test('revise moves the item back to generating and clears any prior error', () => {
+  let state = stateWithVisibleDraft();
+  state = answerHistoryReducer(state, { type: 'error', id: ANSWER_ID, error: '模型超时' });
+  assert.equal(state.items[0].status, 'error');
+
+  const after = answerHistoryReducer(state, {
+    type: 'revise',
+    id: ANSWER_ID,
+    question: COMBINED_QUESTION,
+  });
+
+  assert.equal(after.items[0].status, 'generating');
+  assert.equal(after.items[0].error, undefined);
+});
+
+test('a later done(finalText) replaces the retained draft on the revised item', () => {
+  const revised = answerHistoryReducer(stateWithVisibleDraft(), {
+    type: 'revise',
+    id: ANSWER_ID,
+    question: COMBINED_QUESTION,
+  });
+  assert.equal(revised.items[0].answer, VISIBLE_DRAFT);
+
+  const finalText = '字节序用小端，帧头 0xA55A，长度 2 字节，尾部 CRC32；半包按长度字段在环形缓冲里等齐再解。';
+  const done = answerHistoryReducer(revised, { type: 'done', id: ANSWER_ID, finalText });
+
+  assert.equal(done.items.length, 1);
+  assert.equal(done.items[0].id, ANSWER_ID);
+  assert.equal(done.items[0].answer, finalText, 'the fresh final answer must replace the retained draft');
+  assert.equal(done.items[0].status, 'answered');
+  assert.equal(done.items[0].question, COMBINED_QUESTION);
+  assert.deepEqual(done.items[0].hits, HITS);
+});
+
+test('revise for an unknown answer id does not create an item', () => {
+  const before = stateWithVisibleDraft();
+  const after = answerHistoryReducer(before, {
+    type: 'revise',
+    id: 999999,
+    question: COMBINED_QUESTION,
+  });
+
+  assert.equal(after.items.length, 1);
+  assert.equal(after.items[0].id, ANSWER_ID);
+  assert.equal(after.items[0].question, FIRST_QUESTION);
+});

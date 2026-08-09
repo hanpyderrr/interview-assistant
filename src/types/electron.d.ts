@@ -32,6 +32,40 @@ export interface DynamicActionPayload {
   }
 }
 
+/**
+ * Phase 18 Step 2 diagnostic-only, additive, backward-compatible field.
+ * Never consumed for control flow. textLength only — never transcript text.
+ * Carries minimal source data needed for renderer to materialize all boundaries.
+ */
+export interface NativeAudioTranscriptDiagnostics {
+  /** LocalWhisperSTT.sessionGeneration — distinct from canonical sessionId */
+  sttSessionGeneration?: number
+  /** Host-local performance.now() stamp when the final was first handed off
+   * from the segmenter/VAD to the STT host (dispatch to worker). */
+  hostDispatchMonotonicMs?: number
+  workerQueueWaitMs?: number
+  workerInferenceMs?: number
+  hostRoundTripMs?: number
+  /** Main process emit timestamp (Date.now() wall clock) */
+  mainEmitWallMs?: number
+  textLength?: number
+}
+
+export interface NativeAudioTranscriptEvent {
+  speaker: string
+  text: string
+  final: boolean
+  kind: 'partial' | 'final' | 'reset'
+  sequence: number
+  sessionId: number
+  timestamp: number
+  confidence: number
+  segmentId?: number
+  audioStartMs?: number
+  audioEndMs?: number
+  diagnostics?: NativeAudioTranscriptDiagnostics
+}
+
 export interface ElectronAPI {
   updateContentDimensions: (dimensions: {
     width: number
@@ -243,7 +277,7 @@ export interface ElectronAPI {
   disableHindsight: () => Promise<{ success: boolean; error?: string }>
 
   // Native Audio Service Events
-  onNativeAudioTranscript: (callback: (transcript: { speaker: string; text: string; final: boolean }) => void) => () => void
+  onNativeAudioTranscript: (callback: (transcript: NativeAudioTranscriptEvent) => void) => () => void
   onNativeAudioSuggestion: (callback: (suggestion: { context: string; lastQuestion: string; confidence: number }) => void) => () => void
   onNativeAudioConnected: (callback: () => void) => () => void
   onNativeAudioDisconnected: (callback: () => void) => () => void
@@ -337,6 +371,7 @@ export interface ElectronAPI {
   // Meeting Lifecycle
   startMeeting: (metadata?: any) => Promise<{ success: boolean; error?: string; code?: string }>
   endMeeting: () => Promise<{ success: boolean; error?: string }>
+  retrieveInterviewKnowledge?: (question: string) => Promise<{ success: boolean; context?: string; matches?: Array<{ id: string; title: string; excerpt: string; score: number; source?: string }>; error?: string }>
   debugInjectTranscript: (segments: Array<{ speaker?: string; text: string; timestamp?: number; confidence?: number }>)
     => Promise<{ success: boolean; injected?: number; error?: string }>
   finalizeMicSTT: () => Promise<void>

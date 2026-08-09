@@ -48,6 +48,7 @@ import { analytics } from "./lib/analytics/analytics.service"
 import { ErrorBoundary } from "./components/ErrorBoundary"
 import ModesSettings from "./components/settings/ModesSettings"
 import { ProfileIntelligenceSettings } from "./components/ProfileIntelligenceSettings"
+import InterviewConsole from "./interview-console/InterviewConsole"
 
 
 // DEV-ONLY: should the launcher mount an uncontrolled ReviewPromptHost?
@@ -117,6 +118,7 @@ const App: React.FC = () => {
   // exactly (no transparent-but-interactive regions).
   const isOverlayPillWindow = new URLSearchParams(window.location.search).get('window') === 'overlay-pill';
   const isOverlayToggleWindow = new URLSearchParams(window.location.search).get('window') === 'overlay-toggle';
+  const isInterviewConsole = new URLSearchParams(window.location.search).get('interview') === '1';
   const launcherIsolation = getLauncherIsolation();
   const isolateOnboarding = launcherIsolation === 'onboarding' || launcherIsolation === 'global-surfaces';
   const isolatePermissionsToaster = launcherIsolation === 'permissions-toaster';
@@ -884,6 +886,28 @@ const App: React.FC = () => {
       <React.Suspense fallback={<div className="w-screen h-screen bg-transparent" />}>
         <CropperWindow />
       </React.Suspense>
+    );
+  }
+
+  if (isInterviewConsole && isDefault) {
+    return (
+      <ErrorBoundary context="InterviewConsole">
+        <div className="h-full min-h-0 w-full relative bg-transparent">
+          <QueryClientProvider client={queryClient}>
+            <ToastProvider>
+              <InterviewConsole onOpenSettings={openSettingsExclusive} />
+              <SettingsOverlay
+                isOpen={isSettingsOpen}
+                onClose={() => setIsSettingsOpen(false)}
+                initialTab={settingsInitialTab}
+                initialIsPremium={hasLoadedLicense ? isPremiumActive : null}
+                initialHasNativelyKey={hasNativelyApi}
+              />
+              <ToastViewport />
+            </ToastProvider>
+          </QueryClientProvider>
+        </div>
+      </ErrorBoundary>
     );
   }
 

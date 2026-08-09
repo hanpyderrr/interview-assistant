@@ -110,6 +110,15 @@ export function getBoundedOnnxSessionOptions(): OnnxThreadBounds {
 
 export type OnnxSlotPriority = 'normal' | 'high';
 
+export interface OnnxGateSnapshot {
+    maxConcurrent: number;
+    inFlightNormal: number;
+    inFlightHigh: number;
+    waitersNormal: number;
+    waitersHigh: number;
+    minFreeGB: number;
+}
+
 // The semaphore lives on globalThis, NOT at module scope: this module is
 // inlined into 32 dist bundles (whisper, embedding, reranker, RAG, main), and
 // a per-bundle copy caps sessions at 2 PER COPY — a harness co-loading three
@@ -150,6 +159,18 @@ function canAcquireNow(priority: OnnxSlotPriority): boolean {
     // queued (so Whisper can grab the next slot promptly).
     if (_sem.waitersHigh.length > 0) return false;
     return _sem.inFlightNormal + _sem.inFlightHigh < cap;
+}
+
+/** Read-only diagnostic snapshot for correlating model-loader waits in logs. */
+export function getOnnxGateSnapshot(): OnnxGateSnapshot {
+    return {
+        maxConcurrent: readMaxConcurrent(),
+        inFlightNormal: _sem.inFlightNormal,
+        inFlightHigh: _sem.inFlightHigh,
+        waitersNormal: _sem.waitersNormal.length,
+        waitersHigh: _sem.waitersHigh.length,
+        minFreeGB: readMinFreeGB(),
+    };
 }
 
 /**

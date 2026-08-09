@@ -37,6 +37,7 @@ interface ChannelConfig {
     micModelId: string;
     systemModelId: string;
     globalModelId: string;
+    segmenterMode: 'baseline' | 'meetily-experiment';
 }
 
 interface RecoveryNotice {
@@ -124,7 +125,8 @@ export function LocalWhisperModelPanel() {
         enabled: false,
         micModelId: '',
         systemModelId: '',
-        globalModelId: ''
+        globalModelId: '',
+        segmenterMode: 'baseline',
     });
     
     const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
@@ -212,7 +214,7 @@ export function LocalWhisperModelPanel() {
                 const avail = list.filter((m: any) => m.status === 'available');
                 if (avail.length > 0) {
                     let needsUpdate = false;
-                    const newCfg = { ...cfgRes };
+                    const newCfg = { ...cfgRes, segmenterMode: cfgRes.segmenterMode ?? 'baseline' };
 
                     if (!cfgRes.globalModelId) {
                         newCfg.globalModelId = avail[0].id;
@@ -323,6 +325,11 @@ export function LocalWhisperModelPanel() {
     const setSystemModel = async (modelId: string) => {
         setConfig(prev => ({ ...prev, systemModelId: modelId }));
         await electronAPI?.localWhisperSetChannelConfig?.({ systemModelId: modelId });
+    };
+
+    const setSegmenterMode = async (segmenterMode: 'baseline' | 'meetily-experiment') => {
+        setConfig(prev => ({ ...prev, segmenterMode }));
+        await electronAPI?.localWhisperSetChannelConfig?.({ segmenterMode });
     };
 
     if (loading) {
@@ -441,6 +448,19 @@ export function LocalWhisperModelPanel() {
                             </motion.div>
                         )}
                     </AnimatePresence>
+                    <div className="grid grid-cols-2 gap-4 items-end">
+                        <PremiumSelect
+                            label="实时分段"
+                            value={config.segmenterMode}
+                            onChange={setSegmenterMode}
+                            options={[
+                                { id: 'baseline', name: '现有分段（稳定）' },
+                                { id: 'meetily-experiment', name: 'Meetily 实验分段' },
+                            ]}
+                            placeholder="选择分段模式"
+                        />
+                        <p className="text-xs text-text-tertiary leading-relaxed pb-2">切换后下次面试生效，默认保留现有分段。</p>
+                    </div>
                 </div>
             </div>
 
