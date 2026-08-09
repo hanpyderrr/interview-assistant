@@ -111,14 +111,14 @@ test('provider errors keep the answer panel useful with a local fallback from re
 test('provider timeout placeholder answers are replaced by local fallback drafts', async () => {
   const { answerHistoryReducer, createAnswerHistoryState } = await loadHistory();
   let state = createAnswerHistoryState(10);
-  state = answerHistoryReducer(state, { type: 'enqueue', id: 1, question: 'RK3568 单光子成像系统数据链路怎么设计？' });
+  state = answerHistoryReducer(state, { type: 'enqueue', id: 1, question: '智能家居能耗监测平台的实时数据链路怎么设计？' });
   state = answerHistoryReducer(state, {
     type: 'hits',
     id: 1,
     hits: [{
       id: 'resume.002',
-      title: '单光子成像系统总体架构',
-      excerpt: '单光子成像系统基于RK3568与Buildroot Linux，包含TCSPC光子数据接收、双电机自动调焦、本地图像显示和5G云端传输。',
+      title: '能耗监测平台总体架构',
+      excerpt: '能耗监测平台基于 Linux 嵌入式网关，包含传感器采集、规则引擎、可视化看板和远程告警推送。',
       score: 4.5,
       source: 'resume_fact',
     }],
@@ -133,7 +133,7 @@ test('provider timeout placeholder answers are replaced by local fallback drafts
   assert.equal(item.status, 'error');
   assert.match(item.error || '', /模型超时/);
   assert.match(item.answer, /本地兜底口述稿/);
-  assert.match(item.answer, /单光子成像系统总体架构/);
+  assert.match(item.answer, /能耗监测平台总体架构/);
   assert.doesNotMatch(item.answer, /The model did not produce/);
 });
 
