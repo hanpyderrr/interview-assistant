@@ -19,6 +19,8 @@ test('main registers secure Fun-ASR key/config handlers and resolves stored key 
   assert.match(source, /sttKeyPersistenceWarning\(apiKey, persisted\)/);
   assert.match(source, /No stored Alibaba Fun-ASR API key/);
   assert.match(source, /Could not save Alibaba Fun-ASR API key/);
+  assert.match(source, /const persisted = settings\.setAlibabaFunAsrConfig\(config\)/);
+  assert.match(source, /Could not save Alibaba Fun-ASR configuration/);
 });
 
 test('preload and renderer types expose public config but no raw Fun-ASR credential', () => {
@@ -33,6 +35,19 @@ test('preload and renderer types expose public config but no raw Fun-ASR credent
   }
   assert.match(types, /hasAlibabaFunAsrKey\??: boolean/);
   assert.doesNotMatch(types, /alibabaFunAsrApiKey/);
+});
+
+test('preload setSttProvider implementation accepts the Fun-ASR provider', () => {
+  const preload = read('electron/preload.ts');
+  const exposedObjectStart = preload.indexOf('// STT Provider Management', preload.indexOf('contextBridge.exposeInMainWorld'));
+  const setProviderStart = preload.indexOf('setSttProvider:', exposedObjectStart);
+  const setProviderEnd = preload.indexOf('getSttProvider:', setProviderStart);
+  assert.notEqual(exposedObjectStart, -1);
+  assert.notEqual(setProviderStart, -1);
+  assert.notEqual(setProviderEnd, -1);
+  const implementation = preload.slice(setProviderStart, setProviderEnd);
+  assert.match(implementation, /'alibaba-fun-asr'/);
+  assert.match(implementation, /ipcRenderer\.invoke\('set-stt-provider', provider\)/);
 });
 
 test('connection helper never recognizes the renderer stored-key sentinel', () => {

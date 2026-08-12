@@ -318,6 +318,35 @@ export class SettingsManager {
         return { region, workspaceId, vocabularyId, model };
     }
 
+    public setAlibabaFunAsrConfig(config: AlibabaFunAsrPublicConfig): boolean {
+        if (!ALIBABA_FUN_ASR_REGIONS.includes(config.region)) {
+            throw new TypeError('Unsupported Alibaba region');
+        }
+        if (!ALIBABA_FUN_ASR_MODELS.includes(config.model)) {
+            throw new TypeError('Unsupported Alibaba Fun-ASR model');
+        }
+        const workspaceId = config.workspaceId.trim();
+        buildAlibabaEndpoint(workspaceId, config.region);
+        const vocabularyId = config.vocabularyId?.trim() || undefined;
+        const previous = { ...this.settings };
+        this.settings.alibabaFunAsrRegion = config.region;
+        this.settings.alibabaFunAsrModel = config.model;
+        this.settings.alibabaFunAsrWorkspaceId = workspaceId;
+        this.settings.alibabaFunAsrVocabularyId = vocabularyId;
+
+        const tmpPath = this.settingsPath + '.tmp';
+        try {
+            fs.writeFileSync(tmpPath, JSON.stringify(this.settings, null, 2));
+            fs.renameSync(tmpPath, this.settingsPath);
+            return true;
+        } catch {
+            this.settings = previous;
+            try { fs.unlinkSync(tmpPath); } catch { /* best-effort temp cleanup */ }
+            console.error('[SettingsManager] Failed to save Alibaba Fun-ASR configuration');
+            return false;
+        }
+    }
+
     // ── Smart Browser Context v2 — resolved settings (single default source) ──
     // Manual capture is always on (not represented here). These resolve the
     // documented defaults so callers never repeat them. Sensitive blocking is a

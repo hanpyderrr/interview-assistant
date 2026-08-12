@@ -40,6 +40,13 @@ function freshManager(settings) {
     return SettingsManager.getInstance();
 }
 
+function reloadManager() {
+    delete globalThis.__nativelySettingsManagerV1__;
+    delete require.cache[require.resolve(COMPILED)];
+    const { SettingsManager } = require(COMPILED);
+    return SettingsManager.getInstance();
+}
+
 test('Fun-ASR public config has safe defaults and contains no API key field', () => {
     const config = freshManager().getAlibabaFunAsrConfig();
 
@@ -96,4 +103,51 @@ test('API key is not part of public settings even if hostile persisted JSON inje
     );
     assert.equal(settingsSource.includes('alibabaFunAsrApiKey'), false,
         'AppSettings must never gain an Alibaba API-key field');
+});
+
+test('Fun-ASR public config persists atomically and survives restart', () => {
+    const manager = freshManager();
+    assert.equal(manager.setAlibabaFunAsrConfig({
+        region: 'ap-southeast-1',
+        model: 'fun-asr-realtime-2026-02-28',
+        workspaceId: 'workspace-atomic',
+        vocabularyId: 'vocab-atomic',
+    }), true);
+
+    assert.deepEqual(reloadManager().getAlibabaFunAsrConfig(), {
+        region: 'ap-southeast-1',
+        model: 'fun-asr-realtime-2026-02-28',
+        workspaceId: 'workspace-atomic',
+        vocabularyId: 'vocab-atomic',
+    });
+});
+
+test('Fun-ASR public config returns false and rolls back memory when persistence fails', () => {
+    const manager = freshManager({
+        alibabaFunAsrRegion: 'cn-beijing',
+        alibabaFunAsrModel: 'fun-asr-realtime',
+        alibabaFunAsrWorkspaceId: 'workspace-before',
+        alibabaFunAsrVocabularyId: 'vocab-before',
+    });
+    const before = manager.getAlibabaFunAsrConfig();
+    const originalRename = fs.renameSync;
+    fs.renameSync = () => { throw new Error('simulated atomic rename failure'); };
+    try {
+        assert.equal(manager.setAlibabaFunAsrConfig({
+            region: 'ap-southeast-1',
+            model: 'fun-asr-realtime-2026-02-28',
+            workspaceId: 'workspace-after',
+            vocabularyId: undefined,
+        }), false);
+    } finally {
+        fs.renameSync = originalRename;
+    }
+
+    assert.deepEqual(manager.getAlibabaFunAsrConfig(), before);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(userData, 'settings.json'), 'utf8')), {
+        alibabaFunAsrRegion: 'cn-beijing',
+        alibabaFunAsrModel: 'fun-asr-realtime',
+        alibabaFunAsrWorkspaceId: 'workspace-before',
+        alibabaFunAsrVocabularyId: 'vocab-before',
+    });
 });

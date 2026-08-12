@@ -45,7 +45,8 @@ class FakeTimers {
 }
 
 function harness(overrides = {}) {
-  const socket = new FakeSocket();
+  const { socket: suppliedSocket, ...optionOverrides } = overrides;
+  const socket = suppliedSocket ?? new FakeSocket();
   const timers = new FakeTimers();
   const requests = [];
   const module = require(COMPILED);
@@ -62,7 +63,7 @@ function harness(overrides = {}) {
     },
     uuid: () => TASK_ID,
     timers,
-    ...overrides,
+    ...optionOverrides,
   });
   return { module, socket, timers, requests, promise };
 }
@@ -175,6 +176,29 @@ test('handles socket errors, closes, and malformed protocol without leaking deta
     assertSecretSafe(result);
     assertClean(h);
   }
+});
+
+test('cleanup absorbs the asynchronous error caused by closing a CONNECTING socket and then removes the sink', async () => {
+  class ConnectingAbortSocket extends FakeSocket {
+    readyState = 0;
+    close() {
+      this.closeCalls += 1;
+      queueMicrotask(() => {
+        this.emit('error', new Error(`WebSocket was closed before connection established ${FAKE_KEY}`));
+        this.emit('close', 1006);
+      });
+    }
+  }
+  const socket = new ConnectingAbortSocket();
+  const h = harness({ socket });
+
+  h.timers.fireOnly();
+  const result = await h.promise;
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(result.success, false);
+  assertSecretSafe(result);
+  assertClean(h);
 });
 
 test('validates public config without accepting arbitrary region/model/workspace values', () => {

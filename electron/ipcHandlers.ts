@@ -7546,10 +7546,10 @@ export function initializeIpcHandlers(appState: AppState): void {
       const { validateAlibabaFunAsrPublicConfig } = require('./audio/alibabaFunAsrConnectionTest');
       const config = validateAlibabaFunAsrPublicConfig(input);
       const settings = SettingsManager.getInstance();
-      settings.set('alibabaFunAsrRegion', config.region);
-      settings.set('alibabaFunAsrModel', config.model);
-      settings.set('alibabaFunAsrWorkspaceId', config.workspaceId);
-      settings.set('alibabaFunAsrVocabularyId', config.vocabularyId);
+      const persisted = settings.setAlibabaFunAsrConfig(config);
+      if (!persisted) {
+        return { success: false, error: 'Could not save Alibaba Fun-ASR configuration' };
+      }
       return { success: true };
     } catch {
       return { success: false, error: 'Invalid Alibaba Fun-ASR configuration' };

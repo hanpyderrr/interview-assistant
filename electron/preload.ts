@@ -1555,7 +1555,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       | 'ibmwatson'
       | 'soniox'
       | 'natively'
-      | 'local-whisper',
+      | 'local-whisper'
+      | 'alibaba-fun-asr',
   ) => ipcRenderer.invoke('set-stt-provider', provider),
   getSttProvider: () => ipcRenderer.invoke('get-stt-provider'),
   setGroqSttApiKey: (apiKey: string) => ipcRenderer.invoke('set-groq-stt-api-key', apiKey),

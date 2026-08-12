@@ -14,6 +14,7 @@ import {
 type TimerHandle = ReturnType<typeof setTimeout> | unknown;
 
 interface SocketLike {
+    readyState?: number;
     on(event: string, listener: (...args: any[]) => void): this;
     removeListener(event: string, listener: (...args: any[]) => void): this;
     send(value: string): void;
@@ -101,6 +102,13 @@ export function testAlibabaFunAsrConnection(
         let deadline: TimerHandle | undefined;
         let socket: SocketLike;
 
+        const swallowCloseError = (): void => {
+            // ws emits an asynchronous error when close() aborts CONNECTING.
+        };
+        const removeCloseGuards = (): void => {
+            socket.removeListener('error', swallowCloseError);
+            socket.removeListener('close', removeCloseGuards);
+        };
         const cleanup = (): void => {
             if (deadline !== undefined) {
                 timers.clearTimeout(deadline);
@@ -111,7 +119,18 @@ export function testAlibabaFunAsrConnection(
             socket.removeListener('unexpected-response', onUnexpectedResponse);
             socket.removeListener('error', onError);
             socket.removeListener('close', onClose);
-            try { socket.close(); } catch { /* best-effort close */ }
+            socket.on('error', swallowCloseError);
+            socket.on('close', removeCloseGuards);
+            try {
+                socket.close();
+                // Injected synchronous sockets do not have a WebSocket readyState
+                // or asynchronous close lifecycle, so no guard needs to outlive close().
+                if (socket.readyState === undefined || socket.readyState === 3) {
+                    removeCloseGuards();
+                }
+            } catch {
+                removeCloseGuards();
+            }
         };
         const done = (result: AlibabaFunAsrConnectionTestResult): void => {
             if (settled) return;
