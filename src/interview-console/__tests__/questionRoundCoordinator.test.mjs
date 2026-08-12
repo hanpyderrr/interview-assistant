@@ -422,7 +422,7 @@ test('a transcript reset clears the pending round and invalidates in-flight gene
   );
 });
 
-test('an accepted candidate final closes the pending round', () => {
+test('a candidate final stays pending until the next interviewer final proves a candidate turn', () => {
   const coordinator = createCoordinator();
   coordinator.acceptInterviewerFinal(interviewerFinal({ arrivalMs: 0, audioStartMs: 0, audioEndMs: 1000 }));
   const firstRoundId = coordinator.getSnapshot().roundId;
@@ -438,7 +438,7 @@ test('an accepted candidate final closes the pending round', () => {
     audioStartMs: 1100,
     audioEndMs: 2000,
   });
-  assert.equal(coordinator.getSnapshot().roundOpen, false, 'the candidate answer closes the round');
+  assert.equal(coordinator.getSnapshot().roundOpen, true, 'candidate evidence alone does not close the round');
 
   // The next interviewer final belongs to a new round even inside the gap window.
   coordinator.acceptInterviewerFinal(interviewerFinal({
@@ -448,6 +448,77 @@ test('an accepted candidate final closes the pending round', () => {
     audioEndMs: 2900,
   }));
   assert.notEqual(coordinator.getSnapshot().roundId, firstRoundId);
+  assert.equal(coordinator.getSnapshot().boundaryReason, 'candidate-turn');
+});
+
+test('an inverted candidate audio interval cannot create a candidate-turn boundary', () => {
+  const coordinator = createCoordinator();
+  coordinator.acceptInterviewerFinal(interviewerFinal({ audioStartMs: 0, audioEndMs: 1000 }));
+  const firstRoundId = coordinator.getSnapshot().roundId;
+
+  coordinator.acceptCandidateFinal(candidateFinal({ audioStartMs: 2000, audioEndMs: 1500 }));
+  coordinator.acceptInterviewerFinal(interviewerFinal({
+    text: '还有 CRC32 呢？',
+    sequence: 3,
+    segmentId: 3,
+    arrivalMs: 3000,
+    audioStartMs: 3000,
+    audioEndMs: 3800,
+  }));
+
+  assert.equal(coordinator.getSnapshot().roundId, firstRoundId);
+  assert.notEqual(coordinator.getSnapshot().boundaryReason, 'candidate-turn');
+});
+
+test('candidate evidence is bounded to the latest 32 finals', () => {
+  const coordinator = createCoordinator();
+  coordinator.acceptInterviewerFinal(interviewerFinal({ audioStartMs: 0, audioEndMs: 1000 }));
+  const firstRoundId = coordinator.getSnapshot().roundId;
+
+  coordinator.acceptCandidateFinal(candidateFinal({ audioStartMs: 1500, audioEndMs: 2000 }));
+  for (let index = 0; index < 32; index += 1) {
+    coordinator.acceptCandidateFinal(candidateFinal({
+      sequence: 10 + index,
+      segmentId: 10 + index,
+      audioStartMs: 500,
+      audioEndMs: 900,
+    }));
+  }
+  coordinator.acceptInterviewerFinal(interviewerFinal({
+    text: '继续说 CRC32。',
+    sequence: 50,
+    segmentId: 50,
+    arrivalMs: 4000,
+    audioStartMs: 4000,
+    audioEndMs: 4800,
+  }));
+
+  assert.equal(coordinator.getSnapshot().roundId, firstRoundId, 'the evicted old candidate interval cannot split the round');
+});
+
+test('the newest valid candidate interval survives a batch larger than the evidence cap', () => {
+  const coordinator = createCoordinator();
+  coordinator.acceptInterviewerFinal(interviewerFinal({ audioStartMs: 0, audioEndMs: 1000 }));
+
+  for (let index = 0; index < 33; index += 1) {
+    coordinator.acceptCandidateFinal(candidateFinal({
+      sequence: 10 + index,
+      segmentId: 10 + index,
+      audioStartMs: 500,
+      audioEndMs: 900,
+    }));
+  }
+  coordinator.acceptCandidateFinal(candidateFinal({ sequence: 50, segmentId: 50, audioStartMs: 1500, audioEndMs: 2000 }));
+  coordinator.acceptInterviewerFinal(interviewerFinal({
+    text: '新的问题。',
+    sequence: 51,
+    segmentId: 51,
+    arrivalMs: 4000,
+    audioStartMs: 3000,
+    audioEndMs: 3800,
+  }));
+
+  assert.equal(coordinator.getSnapshot().boundaryReason, 'candidate-turn');
 });
 
 test('boundary priority is deterministic: session change outranks the audio gap', () => {
@@ -485,6 +556,23 @@ test('the audio-gap boundary reason is reported when only the gap closes the rou
     arrivalMs: 10,
     audioStartMs: 1000 + ROUND_GAP_MS,
     audioEndMs: 1000 + ROUND_GAP_MS + 500,
+  }));
+
+  assert.equal(coordinator.getSnapshot().boundaryReason, 'audio-gap');
+});
+
+test('audio-gap outranks candidate-turn when both boundaries are present', () => {
+  const coordinator = createCoordinator();
+  coordinator.acceptInterviewerFinal(interviewerFinal({ audioStartMs: 0, audioEndMs: 1000 }));
+  coordinator.acceptCandidateFinal(candidateFinal({ audioStartMs: 1500, audioEndMs: 2000 }));
+
+  coordinator.acceptInterviewerFinal(interviewerFinal({
+    text: '间隔后的新问题。',
+    sequence: 3,
+    segmentId: 3,
+    arrivalMs: 7000,
+    audioStartMs: 1000 + ROUND_GAP_MS,
+    audioEndMs: 1000 + ROUND_GAP_MS + 800,
   }));
 
   assert.equal(coordinator.getSnapshot().boundaryReason, 'audio-gap');
@@ -688,13 +776,12 @@ test('a new independent round does not invalidate the prior round provider ident
 // ---------------------------------------------------------------------------
 // Phase 18 Step 5 prerequisite: candidate-final flush of a pending round
 //
-// Primary decision: when an accepted `speaker: 'user' && final === true` closes
-// a non-empty round before provisional generation has fired, the coordinator
-// must first allocate the round's answer/attempt IDs and return exactly one
-// provisional `generate` action, then close the round.
+// Primary decision: an accepted `speaker: 'user' && final === true` flushes a
+// non-empty round before provisional generation, but remains pending evidence
+// until the next interviewer final can compare all three audio intervals.
 // ---------------------------------------------------------------------------
 
-/** Accepted candidate final; defaults are a valid closing event. */
+/** Accepted candidate final; defaults provide comparable boundary evidence. */
 function candidateFinal(overrides) {
   return {
     speaker: 'user',
@@ -710,7 +797,7 @@ function candidateFinal(overrides) {
   };
 }
 
-test('a candidate final before the provisional delay flushes the pending round exactly once', () => {
+test('a candidate final before the provisional delay flushes the pending round exactly once and keeps it open', () => {
   const coordinator = createCoordinator();
   coordinator.acceptInterviewerFinal(interviewerFinal({ arrivalMs: 0, audioStartMs: 0, audioEndMs: 1000 }));
 
@@ -728,7 +815,7 @@ test('a candidate final before the provisional delay flushes the pending round e
   assert.equal(after.attemptId, generates[0].attemptId, 'action carries the allocated attempt ID');
   assert.equal(typeof generates[0].answerId, 'number');
   assert.equal(typeof generates[0].attemptId, 'number');
-  assert.equal(after.roundOpen, false, 'the round is closed after the flush');
+  assert.equal(after.roundOpen, true, 'the round stays open until the candidate boundary is proven');
 });
 
 test('a later tick after a candidate flush emits no duplicate generation', () => {
@@ -744,7 +831,7 @@ test('a later tick after a candidate flush emits no duplicate generation', () =>
   assert.deepEqual(coordinator.getSnapshot(), before, 'the later tick does not mutate round state');
 });
 
-test('a candidate final after provisional generation only closes the round', () => {
+test('a candidate final after provisional generation records pending evidence without another generation', () => {
   const coordinator = createCoordinator();
   coordinator.acceptInterviewerFinal(interviewerFinal({ arrivalMs: 0, audioStartMs: 0, audioEndMs: 1000 }));
   const provisional = generateActions(coordinator.tick(PROVISIONAL_MS));
@@ -754,7 +841,7 @@ test('a candidate final after provisional generation only closes the round', () 
 
   assert.deepEqual(generateActions(result), [], 'no second generation for the same round');
   const after = coordinator.getSnapshot();
-  assert.equal(after.roundOpen, false);
+  assert.equal(after.roundOpen, true);
   assert.equal(after.answerId, provisional[0].answerId, 'the answer ID stays stable');
   assert.equal(after.attemptId, provisional[0].attemptId, 'the attempt ID stays stable');
 });

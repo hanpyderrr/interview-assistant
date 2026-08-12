@@ -14,6 +14,7 @@ export type RoundBoundaryReason =
   | 'session-change'
   | 'audio-gap'
   | 'arrival-gap'
+  | 'candidate-turn'
   | 'round-closed'
   | 'first-round'
   | null;
@@ -100,6 +101,7 @@ export interface QuestionRoundCoordinator {
 
 const DEFAULT_PROVISIONAL_DELAY_MS = 2500;
 const DEFAULT_ROUND_GAP_MS = 5000;
+const MAX_PENDING_CANDIDATE_FINALS = 32;
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
@@ -137,6 +139,7 @@ export function createQuestionRoundCoordinator(
   let boundaryReason: RoundBoundaryReason = null;
   let streamId: number | null = null;
   let provisionalFired = false;
+  let pendingCandidateFinals: TranscriptFinal[] = [];
 
   // Minimal prior provenance, kept internal so delayed older finals can be
   // rejected before any mutation. Not exposed on the snapshot.
@@ -251,8 +254,20 @@ export function createQuestionRoundCoordinator(
     if (normalizeSessionId(final.sessionId) !== sessionId) return 'session-change';
     if (!roundOpen) return 'round-closed';
 
-    if (isFiniteNumber(final.audioStartMs) && isFiniteNumber(lastAudioEndMs)) {
-      return final.audioStartMs - lastAudioEndMs >= roundGapMs ? 'audio-gap' : null;
+    if (isFiniteNumber(lastAudioEndMs) && isFiniteNumber(final.audioStartMs)) {
+      const previousInterviewerAudioEndMs = lastAudioEndMs;
+      const nextInterviewerAudioStartMs = final.audioStartMs;
+      if (nextInterviewerAudioStartMs - previousInterviewerAudioEndMs >= roundGapMs) return 'audio-gap';
+      const hasCandidateTurn = pendingCandidateFinals.some((candidate) => (
+        normalizeSessionId(candidate.sessionId) === sessionId
+        && isFiniteNumber(candidate.audioStartMs)
+        && isFiniteNumber(candidate.audioEndMs)
+        && candidate.audioStartMs < candidate.audioEndMs
+        && candidate.audioStartMs > previousInterviewerAudioEndMs
+        && candidate.audioEndMs < nextInterviewerAudioStartMs
+      ));
+      if (hasCandidateTurn) return 'candidate-turn';
+      return null;
     }
     if (isFiniteNumber(final.arrivalMs) && isFiniteNumber(lastArrivalMs)) {
       return final.arrivalMs - lastArrivalMs >= roundGapMs ? 'arrival-gap' : null;
@@ -272,6 +287,7 @@ export function createQuestionRoundCoordinator(
     boundaryReason = reason;
     streamId = null;
     provisionalFired = false;
+    pendingCandidateFinals = [];
   }
 
   function acceptInterviewerFinal(final: TranscriptFinal): { actions: RoundAction[] } {
@@ -279,6 +295,7 @@ export function createQuestionRoundCoordinator(
     if (isDelayedOlderFinal(final)) return { actions };
 
     const reason = classifyBoundary(final);
+    pendingCandidateFinals = [];
 
     if (reason !== null) {
       if (reason === 'session-change') {
@@ -348,12 +365,14 @@ export function createQuestionRoundCoordinator(
     if (roundId === null) return { actions: [] };
     if (final.speaker !== 'user' || final.final !== true) return { actions: [] };
 
-    lastArrivalMs = isFiniteNumber(final.arrivalMs) ? final.arrivalMs : lastArrivalMs;
-    lastAudioEndMs = isFiniteNumber(final.audioEndMs) ? final.audioEndMs : null;
+    pendingCandidateFinals.push({ ...final });
+    if (pendingCandidateFinals.length > MAX_PENDING_CANDIDATE_FINALS) {
+      pendingCandidateFinals.splice(0, pendingCandidateFinals.length - MAX_PENDING_CANDIDATE_FINALS);
+    }
 
-    // Candidate-final flush: when closing a non-empty round that has not yet
-    // fired provisional generation and has no answer/attempt, immediately
-    // generate without waiting for the provisional delay.
+    // Candidate-final flush: generate for a non-empty round that has not fired
+    // provisionally, but keep the round open until the next interviewer final
+    // proves whether this was a real candidate turn or overlapping cross-talk.
     const shouldFlush = pendingQuestion.trim()
       && !provisionalFired
       && answerId === null
@@ -361,11 +380,9 @@ export function createQuestionRoundCoordinator(
 
     if (shouldFlush) {
       const action = fireProvisionalGeneration();
-      roundOpen = false;
       return { actions: [action] };
     }
 
-    roundOpen = false;
     return { actions: [] };
   }
 
@@ -399,6 +416,7 @@ export function createQuestionRoundCoordinator(
     lastSequence = null;
     lastSegmentId = null;
     lastAudioStartMs = null;
+    pendingCandidateFinals = [];
     liveAttempts.clear();
     return { actions };
   }

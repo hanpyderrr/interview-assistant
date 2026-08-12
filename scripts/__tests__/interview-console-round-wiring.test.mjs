@@ -88,10 +88,18 @@ test('the interviewer final gate uses immutable current-round turns and complete
   );
 });
 
-test('an accepted candidate final closes the round through acceptCandidateFinal', () => {
-  has(
-    /acceptCandidateFinal\(/,
-    'a user final must call coordinator.acceptCandidateFinal to close the round',
+test('an accepted candidate final carries complete timing metadata into the coordinator', () => {
+  const start = consoleSource.indexOf('acceptCandidateFinal({');
+  const end = consoleSource.indexOf('}).actions', start);
+  const call = start >= 0 && end > start ? consoleSource.slice(start, end + 2) : '';
+  assert.ok(call, 'a user final must call coordinator.acceptCandidateFinal with an inline metadata object');
+  for (const field of ['sessionId', 'sequence', 'segmentId', 'audioStartMs', 'audioEndMs']) {
+    assert.match(call, new RegExp(field), `acceptCandidateFinal metadata must include ${field}; got: ${call || '<call not found>'}`);
+  }
+  assert.match(
+    call,
+    /arrivalMs\s*:\s*rendererReceiveMonotonicMs/,
+    'candidate arrivalMs must be the renderer monotonic receive time',
   );
 });
 

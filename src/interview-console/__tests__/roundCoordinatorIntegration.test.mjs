@@ -339,18 +339,68 @@ test('an independent question beyond the round gap gets a new answer id without 
 // Requirement 5: candidate final flush, reset / session invalidation
 // ---------------------------------------------------------------------------
 
-test('a candidate final before the 2500 ms provisional delay flushes the round exactly once', () => {
+test('a candidate final before the 2500 ms provisional delay flushes once while keeping the round open', () => {
   const h = createHarness();
   h.interviewerFinal(THREE_PARTS[0]);
-  h.candidateFinal({ speaker: 'user', final: true, sessionId: SESSION_A, arrivalMs: THREE_PARTS[0].arrivalMs + 800, audioEndMs: 2000 });
+  h.candidateFinal({ speaker: 'user', final: true, sessionId: SESSION_A, arrivalMs: THREE_PARTS[0].arrivalMs + 800, audioStartMs: 1500, audioEndMs: 2000 });
 
   const answerId = h.coordinator.getSnapshot().answerId;
   assert.equal(typeof answerId, 'number', 'candidate final flushed generation without waiting for the tick');
   assert.equal(h.history.items.length, 1);
-  assert.equal(h.coordinator.getSnapshot().roundOpen, false, 'the round is closed');
+  assert.equal(h.coordinator.getSnapshot().roundOpen, true, 'candidate evidence stays pending until the next interviewer final');
 
   h.tick(THREE_PARTS[0].arrivalMs + 10_000);
   assert.equal(h.history.items.length, 1, 'a later tick emits no duplicate generation');
+});
+
+test('overlapping candidate cross-talk keeps one answer id and revises the history row in place', () => {
+  const h = createHarness();
+  const first = interviewerFinal({ text: '你怎么设计 SPI 帧头？', sequence: 1, segmentId: 1, arrivalMs: 1000, audioStartMs: 0, audioEndMs: 1200 });
+  h.interviewerFinal(first);
+  h.tick(first.arrivalMs + PROVISIONAL_MS);
+  const answerId = h.coordinator.getSnapshot().answerId;
+
+  h.candidateFinal({ speaker: 'user', text: '串音', final: true, sessionId: SESSION_A, sequence: 2, segmentId: 1, arrivalMs: 3700, audioStartMs: 500, audioEndMs: 1100 });
+  h.interviewerFinal(interviewerFinal({ text: '还有 CRC32 校验？', sequence: 3, segmentId: 2, arrivalMs: 9000, audioStartMs: 1500, audioEndMs: 2600 }));
+
+  const snapshot = h.coordinator.getSnapshot();
+  assert.equal(snapshot.roundId, 1, 'overlap is cross-talk, not a candidate turn');
+  assert.equal(snapshot.answerId, answerId, 'the answer id is reused');
+  assert.equal(h.history.items.length, 1, 'history is revised in place');
+  assert.match(h.history.items[0].question, /SPI.*CRC32/);
+});
+
+test('a candidate interval strictly between interviewer intervals creates a candidate-turn boundary', () => {
+  const h = createHarness();
+  const first = interviewerFinal({ text: '先说说 SPI。', sequence: 1, segmentId: 1, arrivalMs: 1000, audioStartMs: 0, audioEndMs: 1200 });
+  h.interviewerFinal(first);
+  h.tick(first.arrivalMs + PROVISIONAL_MS);
+  const firstAnswerId = h.coordinator.getSnapshot().answerId;
+
+  h.candidateFinal({ speaker: 'user', text: '候选人回答', final: true, sessionId: SESSION_A, sequence: 2, segmentId: 1, arrivalMs: 3700, audioStartMs: 1500, audioEndMs: 3000 });
+  const second = interviewerFinal({ text: '再说说 CRC32。', sequence: 3, segmentId: 2, arrivalMs: 4000, audioStartMs: 3200, audioEndMs: 4200 });
+  h.interviewerFinal(second);
+
+  assert.equal(h.coordinator.getSnapshot().boundaryReason, 'candidate-turn');
+  assert.notEqual(h.coordinator.getSnapshot().roundId, 1);
+  h.tick(second.arrivalMs + PROVISIONAL_MS);
+  assert.notEqual(h.coordinator.getSnapshot().answerId, firstAnswerId, 'the next interviewer round gets a new answer id');
+  assert.equal(h.history.items.length, 2, 'one history row per genuine turn');
+});
+
+test('candidate final without audio metadata does not split a short-gap interviewer round', () => {
+  const h = createHarness();
+  const first = interviewerFinal({ text: '先说说 SPI。', sequence: 1, segmentId: 1, arrivalMs: 1000, audioStartMs: 0, audioEndMs: 1200 });
+  h.interviewerFinal(first);
+  h.tick(first.arrivalMs + PROVISIONAL_MS);
+  const answerId = h.coordinator.getSnapshot().answerId;
+
+  h.candidateFinal({ speaker: 'user', text: '无时钟候选片段', final: true, sessionId: SESSION_A, sequence: 2, segmentId: 1, arrivalMs: 3700 });
+  h.interviewerFinal(interviewerFinal({ text: '还有 CRC32。', sequence: 3, segmentId: 2, arrivalMs: 9000, audioStartMs: 1500, audioEndMs: 2600 }));
+
+  assert.equal(h.coordinator.getSnapshot().answerId, answerId);
+  assert.equal(h.history.items.length, 1);
+  assert.match(h.history.items[0].question, /SPI.*CRC32/);
 });
 
 test('transcript reset invalidates old attempts and clears history', () => {
