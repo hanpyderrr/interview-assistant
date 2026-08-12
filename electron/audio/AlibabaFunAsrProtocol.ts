@@ -24,15 +24,14 @@ export interface AlibabaRunTaskConfig {
 export type AlibabaContextRole = 'user' | 'assistant';
 export type AlibabaContextContentType = 'input_text' | 'text';
 
-export interface AlibabaContextContent {
-    type: AlibabaContextContentType;
+export interface AlibabaContextContent<Type extends AlibabaContextContentType = AlibabaContextContentType> {
+    type: Type;
     text: string;
 }
 
-export interface AlibabaContextMessage {
-    role: AlibabaContextRole;
-    content: readonly AlibabaContextContent[];
-}
+export type AlibabaContextMessage =
+    | { role: 'user'; content: readonly AlibabaContextContent<'input_text'>[] }
+    | { role: 'assistant'; content: readonly AlibabaContextContent<'text'>[] };
 
 interface AlibabaMessageHeader<Action extends string> {
     action: Action;
@@ -237,9 +236,9 @@ export function redactAlibabaError(error: unknown): string {
     message = message
         .replace(/authorization\s*:\s*[^\r\n]*/giu, 'Authorization: [REDACTED]')
         .replace(/bearer\s+[^\s]+/giu, 'Bearer [REDACTED]')
-        .replace(/(https?:\/\/[^\s?]+)\?[^\s]*/giu, '$1?[REDACTED]')
+        .replace(/((?:https?|wss?):\/\/[^\s?]+)\?[^\s]*/giu, '$1?[REDACTED]')
         .replace(/\b(?:sk-[a-z0-9_-]+|fake-[a-z0-9_-]*key)\b/giu, '[REDACTED]')
-        .replace(/[\u0000-\u001f\u007f]/gu, ' ')
+        .replace(/[\u0000-\u001f\u007f-\u009f]/gu, ' ')
         .replace(/\s+/gu, ' ')
         .trim();
     return message.slice(0, 240);
@@ -284,6 +283,12 @@ function assertContext(context: unknown): asserts context is readonly AlibabaCon
             }
             if (content.type !== 'input_text' && content.type !== 'text') {
                 throw new TypeError('Invalid context content type');
+            }
+            if (
+                (message.role === 'user' && content.type !== 'input_text')
+                || (message.role === 'assistant' && content.type !== 'text')
+            ) {
+                throw new TypeError('Context content type does not match role');
             }
             assertNonEmptyString(content.text, 'context text');
         }

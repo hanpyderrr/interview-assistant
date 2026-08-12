@@ -115,6 +115,15 @@ describe('Alibaba Fun-ASR protocol', () => {
         assert.throws(() => buildContinueTask('not-a-uuid', []));
     });
 
+    test('rejects context content types that do not match their roles', () => {
+        assert.throws(() => buildContinueTask(TASK_ID, [
+            { role: 'user', content: [{ type: 'text', text: 'wrong user type' }] },
+        ]));
+        assert.throws(() => buildContinueTask(TASK_ID, [
+            { role: 'assistant', content: [{ type: 'input_text', text: 'wrong assistant type' }] },
+        ]));
+    });
+
     test('builds the exact finish-task schema', () => {
         assert.deepEqual(buildFinishTask(TASK_ID), {
             header: {
@@ -258,5 +267,17 @@ describe('Alibaba Fun-ASR protocol', () => {
         assert.equal(redacted.includes('?api_key='), false);
         assert.equal(/[\u0000-\u001f\u007f]/u.test(redacted), false);
         assert.ok(redacted.length <= 240);
+    });
+
+    test('redacts WebSocket URL queries and C1 control characters', () => {
+        const redacted = redactAlibabaError(
+            'connect wss://workspace123.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference' +
+            '?token=fake-alibaba-api-key&unknown_credential=fake-alibaba-api-key' +
+            '\u0085middle\u009Bend',
+        );
+        assert.equal(redacted.includes('fake-alibaba-api-key'), false);
+        assert.equal(redacted.includes('token='), false);
+        assert.equal(redacted.includes('unknown_credential='), false);
+        assert.equal(/[\u0080-\u009f]/u.test(redacted), false);
     });
 });
