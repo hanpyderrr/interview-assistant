@@ -276,6 +276,7 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
     public finalize(): Promise<void> {
         if (this.finalizeState) return this.finalizeState.promise;
         this.writeClosed = true;
+        this.clearReconnectTimer();
         if (!this.task) return Promise.resolve();
 
         let resolve!: () => void;

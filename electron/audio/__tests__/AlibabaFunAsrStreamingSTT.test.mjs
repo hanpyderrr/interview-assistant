@@ -666,6 +666,17 @@ describe('AlibabaFunAsrStreamingSTT', () => {
         assert.equal(h.sockets[0].sent.filter(Buffer.isBuffer).length, 0);
     });
 
+    test('finalize clears an already scheduled retry when no task remains', async () => {
+        const h = makeHarness();
+        const { socket } = startTask(h);
+        socket.serverClose(1006, 'network');
+        assert.equal(h.timers.jobs.size, 1);
+
+        await h.stt.finalize();
+
+        assert.equal(h.timers.jobs.size, 0);
+    });
+
     test('only audio written after disconnect enters the replacement task queue', () => {
         const h = makeHarness();
         h.stt.write(pcm(100, 16_000, 7));
