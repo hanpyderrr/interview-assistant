@@ -99,11 +99,31 @@ describe('CaptureAudioTimeline', () => {
         assert.deepEqual([chunk.captureStartMs, chunk.captureEndMs], [150, 250]);
     });
 
+    test('rejects an older generation while preserving the origin and both channel cursors', () => {
+        const timeline = new CaptureAudioTimeline();
+        timeline.beginSession(2, 1_000);
+        timeline.stamp('interviewer', pcm(3_200), 16_000, 1_150);
+        timeline.stamp('user', pcm(3_200), 16_000, 1_200);
+
+        assert.throws(() => timeline.beginSession(1, 5_000), /generation/i);
+
+        const interviewer = timeline.stamp('interviewer', pcm(3_200), 16_000, 1_200);
+        const user = timeline.stamp('user', pcm(3_200), 16_000, 1_150);
+        assert.deepEqual([interviewer.captureStartMs, interviewer.captureEndMs], [150, 250]);
+        assert.deepEqual([user.captureStartMs, user.captureEndMs], [200, 300]);
+    });
+
     test('requires an active session and valid finite session values', () => {
         const timeline = new CaptureAudioTimeline();
         assert.throws(() => timeline.stamp('user', pcm(2), 16_000, 1_000), /session/i);
 
-        for (const generation of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5]) {
+        for (const generation of [
+            Number.NaN,
+            Number.POSITIVE_INFINITY,
+            -1,
+            1.5,
+            Number.MAX_SAFE_INTEGER + 1,
+        ]) {
             assert.throws(() => timeline.beginSession(generation, 1_000));
         }
         for (const origin of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
@@ -120,11 +140,23 @@ describe('CaptureAudioTimeline', () => {
         assert.throws(() => timeline.stamp('user', pcm(0), 16_000, 1_000), /empty/i);
         assert.throws(() => timeline.stamp('user', pcm(3), 16_000, 1_000), /even/i);
 
-        for (const sampleRate of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        for (const sampleRate of [
+            0,
+            -1,
+            16_000.5,
+            Number.MAX_SAFE_INTEGER + 1,
+            Number.MAX_VALUE,
+            Number.NaN,
+            Number.POSITIVE_INFINITY,
+        ]) {
             assert.throws(() => timeline.stamp('user', pcm(2), sampleRate, 1_000), /sample rate/i);
         }
         for (const now of [-1, 999, Number.NaN, Number.POSITIVE_INFINITY]) {
             assert.throws(() => timeline.stamp('user', pcm(2), 16_000, now), /monotonic/i);
         }
+        assert.throws(
+            () => timeline.stamp('user', pcm(2), Number.MAX_SAFE_INTEGER, Number.MAX_VALUE),
+            /duration|end time/i,
+        );
     });
 });
