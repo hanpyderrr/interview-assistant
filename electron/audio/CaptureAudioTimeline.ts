@@ -22,7 +22,10 @@ export class CaptureAudioTimeline {
             throw new RangeError('Session origin monotonic time must be finite and non-negative');
         }
         if (this.sessionGeneration === sessionGeneration) {
-            throw new Error(`Session generation ${sessionGeneration} has already begun`);
+            if (this.originMonotonicMs !== originMonotonicMs) {
+                throw new Error(`Session generation ${sessionGeneration} cannot change its origin`);
+            }
+            return;
         }
 
         this.sessionGeneration = sessionGeneration;

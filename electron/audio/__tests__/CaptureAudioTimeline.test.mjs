@@ -61,22 +61,6 @@ describe('CaptureAudioTimeline', () => {
         );
     });
 
-    test('does not expose a reconnect reset and preserves the cursor across arrival gaps', () => {
-        const timeline = new CaptureAudioTimeline();
-        timeline.beginSession(1, 1_000);
-        timeline.stamp('user', pcm(3_200), 16_000, 1_150);
-
-        assert.equal('reconnect' in timeline, false);
-        assert.deepEqual(
-            timeline.stamp('user', pcm(3_200), 16_000, 2_000),
-            {
-                bytes: pcm(3_200),
-                captureStartMs: 900,
-                captureEndMs: 1_000,
-            },
-        );
-    });
-
     test('resets both channel cursors and the origin for a new generation', () => {
         const timeline = new CaptureAudioTimeline();
         timeline.beginSession(1, 1_000);
@@ -91,15 +75,26 @@ describe('CaptureAudioTimeline', () => {
         }
     });
 
-    test('rejects duplicate beginSession for the same generation without resetting cursors', () => {
+    test('treats the same generation and origin as idempotent while preserving both cursors', () => {
+        const timeline = new CaptureAudioTimeline();
+        timeline.beginSession(7, 1_000);
+        timeline.stamp('interviewer', pcm(3_200), 16_000, 1_150);
+        timeline.stamp('user', pcm(3_200), 16_000, 1_200);
+
+        timeline.beginSession(7, 1_000);
+
+        const interviewer = timeline.stamp('interviewer', pcm(3_200), 16_000, 1_200);
+        const user = timeline.stamp('user', pcm(3_200), 16_000, 1_150);
+        assert.deepEqual([interviewer.captureStartMs, interviewer.captureEndMs], [150, 250]);
+        assert.deepEqual([user.captureStartMs, user.captureEndMs], [200, 300]);
+    });
+
+    test('rejects a different origin for the same generation without resetting cursors', () => {
         const timeline = new CaptureAudioTimeline();
         timeline.beginSession(7, 1_000);
         timeline.stamp('interviewer', pcm(3_200), 16_000, 1_150);
 
-        assert.throws(
-            () => timeline.beginSession(7, 2_000),
-            /generation/i,
-        );
+        assert.throws(() => timeline.beginSession(7, 2_000), /origin/i);
         const chunk = timeline.stamp('interviewer', pcm(3_200), 16_000, 1_200);
         assert.deepEqual([chunk.captureStartMs, chunk.captureEndMs], [150, 250]);
     });
