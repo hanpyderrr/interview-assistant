@@ -42,6 +42,15 @@ type NativeAudioTranscriptEvent = {
   diagnostics?: NativeAudioTranscriptDiagnostics;
 };
 
+type AlibabaFunAsrRegion = 'cn-beijing' | 'ap-southeast-1';
+type AlibabaFunAsrModel = 'fun-asr-realtime' | 'fun-asr-realtime-2026-02-28';
+type AlibabaFunAsrPublicConfig = {
+  region: AlibabaFunAsrRegion;
+  model: AlibabaFunAsrModel;
+  workspaceId: string;
+  vocabularyId?: string;
+};
+
 // Types for the exposed Electron API
 interface ElectronAPI {
   updateContentDimensions: (dimensions: { width: number; height: number }) => Promise<void>;
@@ -290,7 +299,8 @@ interface ElectronAPI {
       | 'ibmwatson'
       | 'soniox'
       | 'natively'
-      | 'local-whisper',
+      | 'local-whisper'
+      | 'alibaba-fun-asr',
   ) => Promise<{ success: boolean; error?: string }>;
   localWhisperGetModels: () => Promise<{ models: any[]; activeModelId: string }>;
   localWhisperGetRecoveryNotice: () => Promise<{
@@ -1558,12 +1568,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setIbmWatsonApiKey: (apiKey: string) => ipcRenderer.invoke('set-ibmwatson-api-key', apiKey),
   setGroqSttModel: (model: string) => ipcRenderer.invoke('set-groq-stt-model', model),
   setSonioxApiKey: (apiKey: string) => ipcRenderer.invoke('set-soniox-api-key', apiKey),
+  setAlibabaFunAsrApiKey: (apiKey: string) => ipcRenderer.invoke('set-alibaba-fun-asr-api-key', apiKey),
+  getAlibabaFunAsrConfig: () => ipcRenderer.invoke('get-alibaba-fun-asr-config'),
+  setAlibabaFunAsrConfig: (config: AlibabaFunAsrPublicConfig) =>
+    ipcRenderer.invoke('set-alibaba-fun-asr-config', config),
   setIbmWatsonRegion: (region: string) => ipcRenderer.invoke('set-ibmwatson-region', region),
   testSttConnection: (
-    provider: 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox',
+    provider: 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'alibaba-fun-asr',
     apiKey: string,
-    region?: string,
-  ) => ipcRenderer.invoke('test-stt-connection', provider, apiKey, region),
+    regionOrConfig?: string | AlibabaFunAsrPublicConfig,
+  ) => ipcRenderer.invoke('test-stt-connection', provider, apiKey, regionOrConfig),
   localWhisperGetModels: () => ipcRenderer.invoke('local-whisper-get-models'),
   localWhisperGetRecoveryNotice: () => ipcRenderer.invoke('local-whisper-get-recovery-notice'),
   onnxGetRecoveryNotice: (family) => ipcRenderer.invoke('onnx-get-recovery-notice', family),

@@ -7305,6 +7305,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         hasIbmWatsonKey: hasKey(creds.ibmWatsonApiKey),
         ibmWatsonRegion: creds.ibmWatsonRegion || 'us-south',
         hasSonioxKey: hasKey(creds.sonioxApiKey),
+        hasAlibabaFunAsrKey: hasKey(creds.alibabaFunAsrApiKey),
         // STT key values — returned so the settings UI can pre-populate input fields.
         // SECURITY FIX (P0): Return masked keys only, never raw API keys.
         // The hasSttGroqKey boolean tells UI if key exists — no raw key needed.
@@ -7350,6 +7351,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         hasIbmWatsonKey: false,
         ibmWatsonRegion: 'us-south',
         hasSonioxKey: false,
+        hasAlibabaFunAsrKey: false,
         hasTavilyKey: false,
         sttGroqKey: '',
         sttOpenaiKey: '',
@@ -7446,7 +7448,8 @@ export function initializeIpcHandlers(appState: AppState): void {
         | 'ibmwatson'
         | 'soniox'
         | 'natively'
-        | 'local-whisper',
+        | 'local-whisper'
+        | 'alibaba-fun-asr',
     ) => {
       try {
         const { CredentialsManager } = require('./services/CredentialsManager');
@@ -7518,6 +7521,38 @@ export function initializeIpcHandlers(appState: AppState): void {
     } catch (error: any) {
       console.error('Error saving Groq STT API key:', error);
       return { success: false, error: error.message };
+    }
+  });
+
+  safeHandle('set-alibaba-fun-asr-api-key', async (_, apiKey: string) => {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const persisted = CredentialsManager.getInstance().setAlibabaFunAsrApiKey(apiKey);
+      BrowserWindow.getAllWindows().forEach((win) => {
+        if (!win.isDestroyed()) win.webContents.send('credentials-changed');
+      });
+      return sttKeyPersistenceWarning(apiKey, persisted) ?? { success: true };
+    } catch {
+      return { success: false, error: 'Could not save Alibaba Fun-ASR API key' };
+    }
+  });
+
+  safeHandle('get-alibaba-fun-asr-config', async () => {
+    return SettingsManager.getInstance().getAlibabaFunAsrConfig();
+  });
+
+  safeHandle('set-alibaba-fun-asr-config', async (_, input: unknown) => {
+    try {
+      const { validateAlibabaFunAsrPublicConfig } = require('./audio/alibabaFunAsrConnectionTest');
+      const config = validateAlibabaFunAsrPublicConfig(input);
+      const settings = SettingsManager.getInstance();
+      settings.set('alibabaFunAsrRegion', config.region);
+      settings.set('alibabaFunAsrModel', config.model);
+      settings.set('alibabaFunAsrWorkspaceId', config.workspaceId);
+      settings.set('alibabaFunAsrVocabularyId', config.vocabularyId);
+      return { success: true };
+    } catch {
+      return { success: false, error: 'Invalid Alibaba Fun-ASR configuration' };
     }
   });
 
@@ -7717,12 +7752,20 @@ export function initializeIpcHandlers(appState: AppState): void {
     'test-stt-connection',
     async (
       _,
-      provider: 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox',
+      provider: 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'alibaba-fun-asr',
       apiKey: string,
-      region?: string,
+      regionOrConfig?: unknown,
     ) => {
       console.log(`[IPC] Received test - stt - connection request for provider: ${provider} `);
       try {
+        if (provider === 'alibaba-fun-asr' && apiKey === USE_STORED_KEY_SENTINEL) {
+          const { CredentialsManager } = require('./services/CredentialsManager');
+          const storedKey = CredentialsManager.getInstance().getAlibabaFunAsrApiKey();
+          if (!storedKey) {
+            return { success: false, error: 'No stored Alibaba Fun-ASR API key' };
+          }
+          apiKey = storedKey;
+        }
         // Resolve the sentinel to the persisted key at call time. Pure helper —
         // unit-tested independently. If no key is on disk (or the renderer
         // mistakenly sent the sentinel for a provider that doesn't store a
@@ -7732,6 +7775,22 @@ export function initializeIpcHandlers(appState: AppState): void {
           return { success: false, error: resolved.error };
         }
         apiKey = resolved.apiKey;
+
+        if (provider === 'alibaba-fun-asr') {
+          if (!regionOrConfig || typeof regionOrConfig === 'string') {
+            return { success: false, error: 'Alibaba Fun-ASR configuration is required' };
+          }
+          const { testAlibabaFunAsrConnection, validateAlibabaFunAsrPublicConfig } = require('./audio/alibabaFunAsrConnectionTest');
+          let config;
+          try {
+            config = validateAlibabaFunAsrPublicConfig(regionOrConfig);
+          } catch {
+            return { success: false, error: 'Invalid Alibaba Fun-ASR configuration' };
+          }
+          return testAlibabaFunAsrConnection({ ...config, apiKey });
+        }
+
+        const region = typeof regionOrConfig === 'string' ? regionOrConfig : undefined;
 
         // SSRF guard (defense in depth): for azure/ibmwatson the region param is
         // interpolated into the endpoint hostname below. Reject anything that is
