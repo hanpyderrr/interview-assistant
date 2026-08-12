@@ -11,6 +11,10 @@ const COMPILED = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
     '../../../dist-electron/electron/services/CredentialsManager.js',
 );
+const SOURCE = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '../../services/CredentialsManager.ts',
+);
 const FAKE_API_KEY = 'fake-alibaba-fun-asr-key-Task4-only';
 
 let currentEnv;
@@ -60,11 +64,31 @@ function freshManager(env) {
     return manager;
 }
 
+function captureConsole(callback) {
+    const calls = [];
+    const originals = {};
+    for (const channel of ['log', 'warn', 'error']) {
+        originals[channel] = console[channel];
+        console[channel] = (...parts) => calls.push({ channel, text: parts.map(String).join(' ') });
+    }
+    try {
+        return { result: callback(), calls };
+    } finally {
+        for (const channel of ['log', 'warn', 'error']) console[channel] = originals[channel];
+    }
+}
+
+function assertNoRawKeyInConsole(calls) {
+    assert.equal(
+        calls.some(call => call.text.includes(FAKE_API_KEY)),
+        false,
+        `console output must not expose the fake key: ${JSON.stringify(calls)}`,
+    );
+}
+
 test('Fun-ASR API key persists through the encrypted credential store and survives restart', () => {
     const env = makeEnv();
-    const originalLog = console.log;
-    console.log = (...parts) => env.logs.push(parts.join(' '));
-    try {
+    const { calls } = captureConsole(() => {
         const manager = freshManager(env);
         assert.equal(manager.setAlibabaFunAsrApiKey(`  ${FAKE_API_KEY}  `), true);
         assert.equal(manager.getAlibabaFunAsrApiKey(), FAKE_API_KEY);
@@ -77,11 +101,8 @@ test('Fun-ASR API key persists through the encrypted credential store and surviv
 
         const restarted = freshManager(env);
         assert.equal(restarted.getAlibabaFunAsrApiKey(), FAKE_API_KEY);
-        assert.equal(env.logs.some(line => line.includes(FAKE_API_KEY)), false,
-            'credential logs must never contain raw key material');
-    } finally {
-        console.log = originalLog;
-    }
+    });
+    assertNoRawKeyInConsole(calls);
 });
 
 test('Fun-ASR setter reports persistence failure with the same boolean contract as other STT setters', () => {
@@ -89,9 +110,23 @@ test('Fun-ASR setter reports persistence failure with the same boolean contract 
     const notDirectory = path.join(parent, 'not-a-directory');
     fs.writeFileSync(notDirectory, 'fake fixture');
     const env = makeEnv(notDirectory);
-    const manager = freshManager(env);
+    const { calls } = captureConsole(() => {
+        const manager = freshManager(env);
+        assert.equal(manager.setAlibabaFunAsrApiKey(FAKE_API_KEY), false);
+    });
+    assertNoRawKeyInConsole(calls);
+});
 
-    assert.equal(manager.setAlibabaFunAsrApiKey(FAKE_API_KEY), false);
+test('Fun-ASR setter logging is metadata-only and never interpolates key variables', () => {
+    const source = fs.readFileSync(SOURCE, 'utf8');
+    const setter = source.match(/public setAlibabaFunAsrApiKey[\s\S]*?^    }/m)?.[0];
+    assert.ok(setter, 'Fun-ASR setter must exist');
+    const consoleCalls = [...setter.matchAll(/console\.(?:log|warn|error)\(([^;]*)\);/g)];
+    assert.ok(consoleCalls.length > 0, 'setter should retain a metadata-only status log');
+    for (const [, args] of consoleCalls) {
+        assert.doesNotMatch(args, /\b(?:key|trimmed)\b/,
+            'console calls must not reference raw or normalized key variables');
+    }
 });
 
 test('Fun-ASR is a valid stored STT provider and empty input clears its key', () => {

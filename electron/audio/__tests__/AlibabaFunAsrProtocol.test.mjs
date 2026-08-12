@@ -3,6 +3,7 @@ import { describe, test } from 'node:test';
 
 import {
     ALIBABA_FUN_ASR_MODELS,
+    ALIBABA_FUN_ASR_REGIONS,
     buildAlibabaEndpoint,
     buildContinueTask,
     buildFinishTask,
@@ -37,6 +38,14 @@ describe('Alibaba Fun-ASR protocol', () => {
             'fun-asr-realtime-2026-02-28',
         ]);
         assert.equal(Object.isFrozen(ALIBABA_FUN_ASR_MODELS), true);
+    });
+
+    test('exposes exactly the confirmed immutable region allowlist', () => {
+        assert.deepEqual(ALIBABA_FUN_ASR_REGIONS, [
+            'cn-beijing',
+            'ap-southeast-1',
+        ]);
+        assert.equal(Object.isFrozen(ALIBABA_FUN_ASR_REGIONS), true);
     });
 
     test('builds the exact run-task schema and defaults to the stable model', () => {

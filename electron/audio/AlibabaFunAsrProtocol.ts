@@ -9,8 +9,12 @@ export const ALIBABA_FUN_ASR_MODELS: readonly AlibabaFunAsrModel[] = Object.free
     'fun-asr-realtime-2026-02-28',
 ]);
 
+export const ALIBABA_FUN_ASR_REGIONS: readonly AlibabaFunAsrRegion[] = Object.freeze([
+    'cn-beijing',
+    'ap-southeast-1',
+]);
+
 const DEFAULT_MODEL: AlibabaFunAsrModel = 'fun-asr-realtime';
-const REGIONS: readonly AlibabaFunAsrRegion[] = ['cn-beijing', 'ap-southeast-1'];
 const WORKSPACE_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -115,7 +119,7 @@ export function buildAlibabaEndpoint(workspaceId: string, region: AlibabaFunAsrR
     if (!WORKSPACE_ID_PATTERN.test(workspaceId)) {
         throw new TypeError('Invalid Alibaba workspace ID');
     }
-    if (!REGIONS.includes(region)) {
+    if (!ALIBABA_FUN_ASR_REGIONS.includes(region)) {
         throw new TypeError('Unsupported Alibaba region');
     }
     return `wss://${workspaceId}.${region}.maas.aliyuncs.com/api-ws/v1/inference`;

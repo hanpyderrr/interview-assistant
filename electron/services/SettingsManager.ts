@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import {
     ALIBABA_FUN_ASR_MODELS,
+    ALIBABA_FUN_ASR_REGIONS,
     buildAlibabaEndpoint,
     type AlibabaFunAsrModel,
     type AlibabaFunAsrRegion,
@@ -186,8 +187,6 @@ export interface AlibabaFunAsrPublicConfig {
     vocabularyId?: string;
     model: AlibabaFunAsrModel;
 }
-
-const ALIBABA_FUN_ASR_REGIONS: readonly AlibabaFunAsrRegion[] = ['cn-beijing', 'ap-southeast-1'];
 
 // LEGACY values kept ONLY for migration of existing settings.json files written by older builds.
 // New code MUST NOT branch on these — they are normalized to a VALID_SCREEN_UNDERSTANDING_MODES value on load.
