@@ -18,7 +18,11 @@ registerHooks({
 });
 
 const { CaptureAudioTimeline } = await import('../CaptureAudioTimeline.ts');
-const { AlibabaFunAsrStreamingSTT } = await import('../AlibabaFunAsrStreamingSTT.ts');
+const {
+    AlibabaFunAsrStreamingSTT,
+    appendSentAudioLedger,
+    mapSentAudioOffset,
+} = await import('../AlibabaFunAsrStreamingSTT.ts');
 
 const TASK_IDS = [
     '123e4567-e89b-42d3-a456-426614174000',
@@ -308,6 +312,53 @@ describe('AlibabaFunAsrStreamingSTT', () => {
         );
     });
 
+    test('compacts a long continuous sent-audio ledger while preserving real capture gaps', () => {
+        const ledger = [];
+        for (let index = 0; index < 10_000; index++) {
+            appendSentAudioLedger(ledger, {
+                taskStartMs: index,
+                taskEndMs: index + 1,
+                captureStartMs: index,
+                captureEndMs: index + 1,
+            });
+        }
+        assert.equal(ledger.length, 1);
+        appendSentAudioLedger(ledger, {
+            taskStartMs: 10_000,
+            taskEndMs: 10_001,
+            captureStartMs: 20_000,
+            captureEndMs: 20_001,
+        });
+        assert.equal(ledger.length, 2);
+        assert.equal(mapSentAudioOffset(ledger, 10_000, 'begin'), 20_000);
+        assert.equal(mapSentAudioOffset(ledger, 10_000, 'end'), 10_000);
+    });
+
+    test('maps a 48 kHz twelve-chunk 400ms endpoint despite floating accumulation', () => {
+        const h = makeHarness();
+        h.stt.setSampleRate(48_000);
+        for (let index = 1; index <= 12; index++) {
+            h.setMonotonic(1_000 + index * (400 / 12));
+            h.stt.write(pcm(400 / 12, 48_000));
+        }
+        const socket = h.sockets[0];
+        socket.open();
+        socket.message({ header: { event: 'task-started', task_id: TASK_IDS[0] }, payload: {} });
+        const transcripts = [];
+        h.stt.on('transcript', value => transcripts.push(value));
+
+        socket.message(result(TASK_IDS[0], {
+            begin_time: 0,
+            end_time: 400,
+            text: 'exact endpoint',
+            sentence_end: false,
+        }));
+
+        assert.equal(transcripts.length, 1);
+        assert.ok(Math.abs(transcripts[0].audioStartMs) <= 1e-6);
+        assert.ok(Math.abs(transcripts[0].audioEndMs - 400) <= 1e-6);
+    });
+
     test('never exposes unprovable server time as cross-speaker audio metadata', () => {
         const h = makeHarness();
         const { socket, taskId } = startTask(h, pcm(100));
@@ -403,9 +454,50 @@ describe('AlibabaFunAsrStreamingSTT', () => {
         assert.equal(finishFrames(socket).length, 1);
     });
 
+    test('finalize closes the write gate immediately and task-finished closes the task and watchdog', async () => {
+        const h = makeHarness();
+        const { socket, taskId } = startTask(h);
+        const binaryBefore = socket.sent.filter(Buffer.isBuffer).length;
+        const finalized = h.stt.finalize();
+
+        assert.throws(() => h.stt.write(pcm(10)), /finaliz|write/i);
+        assert.equal(socket.sent.filter(Buffer.isBuffer).length, binaryBefore);
+        socket.message({ header: { event: 'task-finished', task_id: taskId }, payload: {} });
+        await finalized;
+
+        assert.throws(() => h.stt.write(pcm(10)), /finaliz|write/i);
+        assert.equal(socket.sent.filter(Buffer.isBuffer).length, binaryBefore);
+        assert.equal(socket.closeCalls.length, 1);
+        assert.equal(h.timers.jobs.size, 0);
+    });
+
+    test('finalize deadline leaves the write gate closed', async () => {
+        const h = makeHarness();
+        const { socket } = startTask(h);
+        const binaryBefore = socket.sent.filter(Buffer.isBuffer).length;
+        const finalized = h.stt.finalize();
+        h.timers.advance(10_000);
+        await finalized;
+
+        assert.throws(() => h.stt.write(pcm(10)), /finaliz|write/i);
+        assert.equal(socket.sent.filter(Buffer.isBuffer).length, binaryBefore);
+    });
+
+    test('unsolicited matching task-finished is terminal and closes later writes', () => {
+        const h = makeHarness();
+        const { socket, taskId } = startTask(h);
+        socket.message({ header: { event: 'task-finished', task_id: taskId }, payload: {} });
+
+        assert.throws(() => h.stt.write(pcm(10)), /closed|finaliz|write/i);
+        assert.equal(socket.closeCalls.length, 1);
+        assert.equal(h.timers.jobs.size, 0);
+    });
+
     test('task-failed rejects finalize with a redacted metadata-only error', async () => {
         const h = makeHarness();
         const { socket, taskId } = startTask(h);
+        const errors = [];
+        h.stt.on('error', error => errors.push(error));
         const finalized = h.stt.finalize();
         socket.message({
             header: {
@@ -422,6 +514,35 @@ describe('AlibabaFunAsrStreamingSTT', () => {
             assert.equal(error.message.includes('raw provider body'), false);
             return true;
         });
+        assert.equal(errors.length, 1);
+    });
+
+    test('task-failed without finalize is a terminal metadata-only error and rejects later writes', () => {
+        const h = makeHarness();
+        const { socket, taskId } = startTask(h);
+        const errors = [];
+        const binaryBefore = socket.sent.filter(Buffer.isBuffer).length;
+        h.stt.on('error', error => errors.push(error));
+
+        socket.message({
+            header: {
+                event: 'task-failed',
+                task_id: taskId,
+                error_code: 'ProviderFailure',
+                error_message: 'Bearer fake-alibaba-api-key raw transcript body',
+            },
+            payload: {},
+        });
+
+        assert.equal(errors.length, 1);
+        assert.equal(errors[0].code, 'alibaba-task-failed');
+        assert.equal(errors[0].taskId, taskId);
+        assert.equal(errors[0].message.includes('fake-alibaba-api-key'), false);
+        assert.equal(errors[0].message.includes('raw transcript body'), false);
+        assert.equal(socket.closeCalls.length, 1);
+        assert.equal(h.timers.jobs.size, 0);
+        assert.throws(() => h.stt.write(pcm(10)), /closed|failed|write/i);
+        assert.equal(socket.sent.filter(Buffer.isBuffer).length, binaryBefore);
     });
 
     test('socket close rejects an active finalize while its deadline and no-task finalize settle finitely', async () => {
@@ -523,6 +644,32 @@ describe('AlibabaFunAsrStreamingSTT', () => {
         assert.deepEqual(observed, [2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000, 30_000, 30_000]);
         h.sockets.at(-1).serverClose(1006, 'network');
         assert.equal(h.timers.jobs.size, 0);
+    });
+
+    test('disconnect before task-started drops old queued audio and empty backoff does not create a task', () => {
+        const h = makeHarness();
+        h.stt.write(pcm(100, 16_000, 7));
+        h.sockets[0].serverClose(1006, 'network');
+
+        h.timers.advance(1_000);
+
+        assert.equal(h.sockets.length, 1);
+        assert.equal(h.sockets[0].sent.filter(Buffer.isBuffer).length, 0);
+    });
+
+    test('only audio written after disconnect enters the replacement task queue', () => {
+        const h = makeHarness();
+        h.stt.write(pcm(100, 16_000, 7));
+        h.sockets[0].serverClose(1006, 'network');
+        h.stt.write(pcm(100, 16_000, 9));
+
+        h.timers.advance(1_000);
+        const replacement = h.sockets[1];
+        replacement.open();
+        const replacementTaskId = runFrames(replacement)[0].header.task_id;
+        replacement.message({ header: { event: 'task-started', task_id: replacementTaskId }, payload: {} });
+
+        assert.deepEqual(replacement.sent.filter(Buffer.isBuffer).map(value => value[0]), [9]);
     });
 
     test('treats 401 and 403 handshake responses as fatal without reconnecting', () => {

@@ -21,6 +21,7 @@ const FINALIZE_DEADLINE_MS = 10_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
 const USER_AGENT = 'Natively AlibabaFunAsrStreamingSTT/1';
+const LEDGER_EPSILON_MS = 1e-6;
 
 interface SocketLike {
     readyState: number;
@@ -57,14 +58,79 @@ interface TaskState {
     started: boolean;
     finishSent: boolean;
     confirmedSentDurationMs: number;
-    sentLedger: SentChunkLedgerEntry[];
+    sentLedger: SentAudioLedgerEntry[];
 }
 
-interface SentChunkLedgerEntry {
+export interface SentAudioLedgerEntry {
     taskStartMs: number;
     taskEndMs: number;
     captureStartMs: number;
     captureEndMs: number;
+}
+
+export function appendSentAudioLedger(
+    ledger: SentAudioLedgerEntry[],
+    entry: SentAudioLedgerEntry,
+): void {
+    const previous = ledger.at(-1);
+    if (
+        previous
+        && Math.abs(previous.taskEndMs - entry.taskStartMs) <= LEDGER_EPSILON_MS
+        && Math.abs(previous.captureEndMs - entry.captureStartMs) <= LEDGER_EPSILON_MS
+    ) {
+        previous.taskEndMs = entry.taskEndMs;
+        previous.captureEndMs = entry.captureEndMs;
+        return;
+    }
+    ledger.push(entry);
+}
+
+export function mapSentAudioOffset(
+    ledger: readonly SentAudioLedgerEntry[],
+    offsetMs: number,
+    edge: 'begin' | 'end',
+): number | undefined {
+    if (ledger.length === 0 || !Number.isFinite(offsetMs) || offsetMs < 0) return undefined;
+    if (edge === 'end' && offsetMs <= LEDGER_EPSILON_MS) return ledger[0].captureStartMs;
+
+    let low = 0;
+    let high = ledger.length;
+    if (edge === 'begin') {
+        while (low < high) {
+            const middle = (low + high) >>> 1;
+            if (ledger[middle].taskStartMs <= offsetMs + LEDGER_EPSILON_MS) low = middle + 1;
+            else high = middle;
+        }
+        const index = low - 1;
+        if (index < 0) return undefined;
+        const entry = ledger[index];
+        if (
+            offsetMs < entry.taskStartMs - LEDGER_EPSILON_MS
+            || offsetMs >= entry.taskEndMs - LEDGER_EPSILON_MS
+        ) return undefined;
+        return interpolateLedgerEntry(entry, offsetMs);
+    }
+
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (ledger[middle].taskEndMs < offsetMs - LEDGER_EPSILON_MS) low = middle + 1;
+        else high = middle;
+    }
+    if (low >= ledger.length) return undefined;
+    const entry = ledger[low];
+    if (
+        offsetMs <= entry.taskStartMs + LEDGER_EPSILON_MS
+        || offsetMs > entry.taskEndMs + LEDGER_EPSILON_MS
+    ) return undefined;
+    return interpolateLedgerEntry(entry, offsetMs);
+}
+
+function interpolateLedgerEntry(entry: SentAudioLedgerEntry, offsetMs: number): number {
+    const clampedOffset = Math.min(entry.taskEndMs, Math.max(entry.taskStartMs, offsetMs));
+    if (Math.abs(clampedOffset - entry.taskStartMs) <= LEDGER_EPSILON_MS) return entry.captureStartMs;
+    if (Math.abs(clampedOffset - entry.taskEndMs) <= LEDGER_EPSILON_MS) return entry.captureEndMs;
+    const fraction = (clampedOffset - entry.taskStartMs) / (entry.taskEndMs - entry.taskStartMs);
+    return entry.captureStartMs + fraction * (entry.captureEndMs - entry.captureStartMs);
 }
 
 interface FinalizeState {
@@ -113,6 +179,7 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
     private segmentId = 0;
     private stopped = false;
     private authFatal = false;
+    private writeClosed = true;
 
     constructor(options: AlibabaFunAsrStreamingSTTOptions) {
         super();
@@ -184,10 +251,12 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
         this.reconnectAttempts = 0;
         this.authFatal = false;
         this.stopped = false;
+        this.writeClosed = false;
     }
 
     public write(bytes: Buffer): void {
         if (this.stopped) throw new Error('Alibaba streaming STT has been stopped');
+        if (this.writeClosed) throw new Error('Alibaba streaming STT write gate is closed for finalization');
         if (this.captureGeneration === undefined) throw new Error('Capture session has not begun');
         const chunk = this.timeline.stamp(this.channel, bytes, this.sampleRate, this.monotonicNow());
         this.enqueue(chunk);
@@ -202,6 +271,7 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
 
     public finalize(): Promise<void> {
         if (this.finalizeState) return this.finalizeState.promise;
+        this.writeClosed = true;
         if (!this.task) return Promise.resolve();
 
         let resolve!: () => void;
@@ -220,6 +290,7 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
     public stop(): void {
         if (this.stopped) return;
         this.stopped = true;
+        this.writeClosed = true;
         this.captureGeneration = undefined;
         this.settleFinalize(this.codedError('alibaba-stopped', 'Alibaba streaming STT stopped'));
         this.invalidateConnection();
@@ -307,15 +378,21 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
                 return;
             case 'task-finished':
                 task.sentLedger = [];
+                this.writeClosed = true;
                 this.settleFinalize();
+                this.terminateTask(socket, task);
                 return;
             case 'task-failed':
                 task.sentLedger = [];
-                this.settleFinalize(this.codedError(
+                this.writeClosed = true;
+                const taskError = this.codedError(
                     'alibaba-task-failed',
                     `Alibaba task failed (${parsed.event.errorCode})`,
                     task.taskId,
-                ));
+                );
+                this.settleFinalize(taskError);
+                this.terminateTask(socket, task);
+                this.emit('error', taskError);
                 return;
         }
     }
@@ -336,8 +413,8 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
             segmentId: ++this.segmentId,
         };
         const end = sentence.endTime;
-        const audioStartMs = this.mapTaskOffset(task, sentence.beginTime, 'begin');
-        const audioEndMs = end === null ? undefined : this.mapTaskOffset(task, end, 'end');
+        const audioStartMs = mapSentAudioOffset(task.sentLedger, sentence.beginTime, 'begin');
+        const audioEndMs = end === null ? undefined : mapSentAudioOffset(task.sentLedger, end, 'end');
         if (audioStartMs !== undefined && audioEndMs !== undefined && audioEndMs >= audioStartMs) {
             transcript.audioStartMs = audioStartMs;
             transcript.audioEndMs = audioEndMs;
@@ -380,7 +457,7 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
                 return;
             }
             const taskStartMs = task.confirmedSentDurationMs;
-            task.sentLedger.push({
+            appendSentAudioLedger(task.sentLedger, {
                 taskStartMs,
                 taskEndMs: taskStartMs + durationMs,
                 captureStartMs: chunk.captureStartMs,
@@ -388,19 +465,6 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
             });
             task.confirmedSentDurationMs += durationMs;
         }
-    }
-
-    private mapTaskOffset(task: TaskState, offsetMs: number, edge: 'begin' | 'end'): number | undefined {
-        if (edge === 'end' && offsetMs === 0) {
-            return task.sentLedger[0]?.captureStartMs;
-        }
-        const entry = task.sentLedger.find(item => edge === 'begin'
-            ? offsetMs >= item.taskStartMs && offsetMs < item.taskEndMs
-            : offsetMs > item.taskStartMs && offsetMs <= item.taskEndMs);
-        if (!entry) return undefined;
-        if (edge === 'begin' && offsetMs === entry.taskStartMs) return entry.captureStartMs;
-        if (edge === 'end' && offsetMs === entry.taskEndMs) return entry.captureEndMs;
-        return entry.captureStartMs + (offsetMs - entry.taskStartMs);
     }
 
     private sendFinishIfReady(task: TaskState): void {
@@ -472,6 +536,19 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
         if (state.timer !== undefined) this.timers.clearTimeout(state.timer);
         if (error) state.reject(error);
         else state.resolve();
+    }
+
+    private terminateTask(socket: SocketLike, task: TaskState): void {
+        if (!this.matches(socket, task)) return;
+        this.connectionGeneration++;
+        this.clearReconnectTimer();
+        this.clearWatchdog();
+        this.socket = null;
+        this.task = null;
+        this.queue = [];
+        this.queuedDurationMs = 0;
+        task.sentLedger = [];
+        try { socket.close(); } catch { /* best effort */ }
     }
 
     private invalidateConnection(): void {
