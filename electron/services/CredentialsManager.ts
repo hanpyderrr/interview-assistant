@@ -60,7 +60,7 @@ export interface StoredCredentials {
     defaultModel?: string;
     nativelyApiKey?: string;
     // STT Provider settings
-    sttProvider?: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local-whisper';
+    sttProvider?: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local-whisper' | 'alibaba-fun-asr';
     groqSttApiKey?: string;
     groqSttModel?: string;
     openAiSttApiKey?: string;
@@ -74,6 +74,7 @@ export interface StoredCredentials {
     ibmWatsonApiKey?: string;
     ibmWatsonRegion?: string;
     sonioxApiKey?: string;
+    alibabaFunAsrApiKey?: string;
     sttLanguage?: string;
     aiResponseLanguage?: string;
     // Tavily Search
@@ -320,7 +321,7 @@ export class CredentialsManager {
         return this.credentials.customProviders || [];
     }
 
-    public getSttProvider(): 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local-whisper' {
+    public getSttProvider(): 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local-whisper' | 'alibaba-fun-asr' {
         const provider = this.credentials.sttProvider || 'none';
         // Self-heal: if provider is 'none' but a Natively key exists, the user is in a
         // broken state (key cleared then re-entered via a path that skipped auto-promote,
@@ -376,6 +377,10 @@ export class CredentialsManager {
 
     public getSonioxApiKey(): string | undefined {
         return this.credentials.sonioxApiKey;
+    }
+
+    public getAlibabaFunAsrApiKey(): string | undefined {
+        return this.credentials.alibabaFunAsrApiKey;
     }
 
     public getTavilyApiKey(): string | undefined {
@@ -582,7 +587,7 @@ export class CredentialsManager {
         console.log('[CredentialsManager] Google Service Account path updated');
     }
 
-    public setSttProvider(provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local-whisper'): boolean {
+    public setSttProvider(provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local-whisper' | 'alibaba-fun-asr'): boolean {
         this.credentials.sttProvider = provider;
         const persisted = this.saveCredentials();
         console.log(`[CredentialsManager] STT Provider set to: ${provider}`);
@@ -680,6 +685,14 @@ export class CredentialsManager {
         return persisted;
     }
 
+    public setAlibabaFunAsrApiKey(key: string): boolean {
+        const trimmed = (key || '').trim();
+        this.credentials.alibabaFunAsrApiKey = trimmed || undefined;
+        const persisted = this.saveCredentials();
+        console.log('[CredentialsManager] Alibaba Fun-ASR API Key updated');
+        return persisted;
+    }
+
     public setTavilyApiKey(key: string): void {
         // Store undefined (not empty string) when removing, so hasKey() checks stay consistent
         this.credentials.tavilyApiKey = key.trim() || undefined;
@@ -705,7 +718,7 @@ export class CredentialsManager {
      * renderer state — the masked pre-population regression from #318 was
      * caused by exactly that pattern. This getter is test-time only.
      */
-    public getStoredSttKeyForProvider(provider: 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox'): string | undefined {
+    public getStoredSttKeyForProvider(provider: 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'alibaba-fun-asr'): string | undefined {
         switch (provider) {
             case 'groq':       return this.credentials.groqSttApiKey;
             case 'openai':     return this.credentials.openAiSttApiKey;
@@ -714,6 +727,7 @@ export class CredentialsManager {
             case 'azure':      return this.credentials.azureApiKey;
             case 'ibmwatson':  return this.credentials.ibmWatsonApiKey;
             case 'soniox':     return this.credentials.sonioxApiKey;
+            case 'alibaba-fun-asr': return this.credentials.alibabaFunAsrApiKey;
         }
     }
 

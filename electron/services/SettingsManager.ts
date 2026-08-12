@@ -1,6 +1,12 @@
 import { app } from 'electron';
 import fs from 'fs';
 import path from 'path';
+import {
+    ALIBABA_FUN_ASR_MODELS,
+    buildAlibabaEndpoint,
+    type AlibabaFunAsrModel,
+    type AlibabaFunAsrRegion,
+} from '../audio/AlibabaFunAsrProtocol';
 
 export interface AppSettings {
     // Only boot-critical or non-encrypted settings should live here.
@@ -98,6 +104,10 @@ export interface AppSettings {
     localWhisperModelMic?: string;
     localWhisperModelSystem?: string;
     localWhisperSegmenter?: 'baseline' | 'meetily-experiment';
+    alibabaFunAsrRegion?: AlibabaFunAsrRegion;
+    alibabaFunAsrWorkspaceId?: string;
+    alibabaFunAsrVocabularyId?: string;
+    alibabaFunAsrModel?: AlibabaFunAsrModel;
     // Phase 6 — TelemetryService toggle. Defaults to true (local-only JSONL).
     // When false, no telemetry is written to disk and no sinks fire.
     telemetryEnabled?: boolean;
@@ -169,6 +179,15 @@ export type ContextDebugLevelSetting = typeof VALID_CONTEXT_DEBUG_LEVELS[number]
 
 export const VALID_SCREEN_UNDERSTANDING_MODES = ['vision_first', 'vision_only', 'private_vision'] as const;
 export type ScreenUnderstandingMode = typeof VALID_SCREEN_UNDERSTANDING_MODES[number];
+
+export interface AlibabaFunAsrPublicConfig {
+    region: AlibabaFunAsrRegion;
+    workspaceId: string;
+    vocabularyId?: string;
+    model: AlibabaFunAsrModel;
+}
+
+const ALIBABA_FUN_ASR_REGIONS: readonly AlibabaFunAsrRegion[] = ['cn-beijing', 'ap-southeast-1'];
 
 // LEGACY values kept ONLY for migration of existing settings.json files written by older builds.
 // New code MUST NOT branch on these — they are normalized to a VALID_SCREEN_UNDERSTANDING_MODES value on load.
@@ -270,6 +289,34 @@ export class SettingsManager {
 
     public getTechnicalInterviewVisionFirst(): boolean {
         return this.settings.technicalInterviewVisionFirst !== false;
+    }
+
+    public getAlibabaFunAsrConfig(): AlibabaFunAsrPublicConfig {
+        const rawRegion = this.settings.alibabaFunAsrRegion;
+        const region = ALIBABA_FUN_ASR_REGIONS.includes(rawRegion as AlibabaFunAsrRegion)
+            ? rawRegion as AlibabaFunAsrRegion
+            : 'cn-beijing';
+        const rawModel = this.settings.alibabaFunAsrModel;
+        const model = ALIBABA_FUN_ASR_MODELS.includes(rawModel as AlibabaFunAsrModel)
+            ? rawModel as AlibabaFunAsrModel
+            : 'fun-asr-realtime';
+        const rawWorkspaceId = this.settings.alibabaFunAsrWorkspaceId;
+        const candidateWorkspaceId = typeof rawWorkspaceId === 'string' ? rawWorkspaceId.trim() : '';
+        let workspaceId = '';
+        if (candidateWorkspaceId) {
+            try {
+                buildAlibabaEndpoint(candidateWorkspaceId, region);
+                workspaceId = candidateWorkspaceId;
+            } catch {
+                workspaceId = '';
+            }
+        }
+        const rawVocabularyId = this.settings.alibabaFunAsrVocabularyId;
+        const vocabularyId = typeof rawVocabularyId === 'string'
+            ? rawVocabularyId.trim() || undefined
+            : undefined;
+
+        return { region, workspaceId, vocabularyId, model };
     }
 
     // ── Smart Browser Context v2 — resolved settings (single default source) ──
