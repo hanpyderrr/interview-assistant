@@ -56,8 +56,15 @@ interface TaskState {
     captureGeneration: number;
     started: boolean;
     finishSent: boolean;
-    baseCaptureStartMs?: number;
     confirmedSentDurationMs: number;
+    sentLedger: SentChunkLedgerEntry[];
+}
+
+interface SentChunkLedgerEntry {
+    taskStartMs: number;
+    taskEndMs: number;
+    captureStartMs: number;
+    captureEndMs: number;
 }
 
 interface FinalizeState {
@@ -230,6 +237,7 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
             started: false,
             finishSent: false,
             confirmedSentDurationMs: 0,
+            sentLedger: [],
         };
         this.task = task;
         const endpoint = buildAlibabaEndpoint(this.workspaceId, this.region);
@@ -252,6 +260,7 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
                 languageHint: this.languageHint,
                 vocabularyId: this.vocabularyId,
             })));
+            this.armWatchdog(socket, task);
         });
         socket.on('message', raw => this.onMessage(socket, task, raw));
         socket.on('close', (code: number) => this.onClose(socket, task, code));
@@ -297,9 +306,11 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
                 this.emitSentence(task, parsed.event.sentence);
                 return;
             case 'task-finished':
+                task.sentLedger = [];
                 this.settleFinalize();
                 return;
             case 'task-failed':
+                task.sentLedger = [];
                 this.settleFinalize(this.codedError(
                     'alibaba-task-failed',
                     `Alibaba task failed (${parsed.event.errorCode})`,
@@ -324,20 +335,19 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
             confidence: 1,
             segmentId: ++this.segmentId,
         };
-        const base = task.baseCaptureStartMs;
         const end = sentence.endTime;
-        if (
-            base !== undefined
-            && end !== null
-            && sentence.beginTime <= end
-            && end <= task.confirmedSentDurationMs
-        ) {
-            transcript.audioStartMs = base + sentence.beginTime;
-            transcript.audioEndMs = base + end;
-        } else if (end !== null) {
+        const audioStartMs = this.mapTaskOffset(task, sentence.beginTime, 'begin');
+        const audioEndMs = end === null ? undefined : this.mapTaskOffset(task, end, 'end');
+        if (audioStartMs !== undefined && audioEndMs !== undefined && audioEndMs >= audioStartMs) {
+            transcript.audioStartMs = audioStartMs;
+            transcript.audioEndMs = audioEndMs;
+        } else {
             this.emitWarning({ code: 'unmapped-server-time', taskId: task.taskId });
         }
         this.emit('transcript', transcript);
+        if (sentence.sentenceEnd && end !== null) {
+            task.sentLedger = task.sentLedger.filter(entry => entry.taskEndMs > end);
+        }
     }
 
     private enqueue(chunk: CapturedPcmChunk): void {
@@ -369,9 +379,28 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
                 this.queuedDurationMs += durationMs;
                 return;
             }
-            if (task.baseCaptureStartMs === undefined) task.baseCaptureStartMs = chunk.captureStartMs;
+            const taskStartMs = task.confirmedSentDurationMs;
+            task.sentLedger.push({
+                taskStartMs,
+                taskEndMs: taskStartMs + durationMs,
+                captureStartMs: chunk.captureStartMs,
+                captureEndMs: chunk.captureEndMs,
+            });
             task.confirmedSentDurationMs += durationMs;
         }
+    }
+
+    private mapTaskOffset(task: TaskState, offsetMs: number, edge: 'begin' | 'end'): number | undefined {
+        if (edge === 'end' && offsetMs === 0) {
+            return task.sentLedger[0]?.captureStartMs;
+        }
+        const entry = task.sentLedger.find(item => edge === 'begin'
+            ? offsetMs >= item.taskStartMs && offsetMs < item.taskEndMs
+            : offsetMs > item.taskStartMs && offsetMs <= item.taskEndMs);
+        if (!entry) return undefined;
+        if (edge === 'begin' && offsetMs === entry.taskStartMs) return entry.captureStartMs;
+        if (edge === 'end' && offsetMs === entry.taskEndMs) return entry.captureEndMs;
+        return entry.captureStartMs + (offsetMs - entry.taskStartMs);
     }
 
     private sendFinishIfReady(task: TaskState): void {

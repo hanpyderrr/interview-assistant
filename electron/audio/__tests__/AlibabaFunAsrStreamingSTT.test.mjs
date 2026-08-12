@@ -277,6 +277,37 @@ describe('AlibabaFunAsrStreamingSTT', () => {
         assert.equal(transcripts[0].audioEndMs, 1_100);
     });
 
+    test('maps continuous task offsets through capture gaps with explicit boundary semantics', () => {
+        const h = makeHarness();
+        h.stt.write(pcm(100)); // task [0,100], capture [0,100]
+        h.setMonotonic(2_000);
+        h.stt.write(pcm(100)); // task [100,200], capture [900,1000]
+        const socket = h.sockets[0];
+        socket.open();
+        socket.message({ header: { event: 'task-started', task_id: TASK_IDS[0] }, payload: {} });
+        const transcripts = [];
+        h.stt.on('transcript', value => transcripts.push(value));
+
+        socket.message(result(TASK_IDS[0], {
+            begin_time: 100,
+            end_time: 200,
+            text: 'second chunk',
+            sentence_end: false,
+        }));
+        socket.message(result(TASK_IDS[0], {
+            begin_time: 50,
+            end_time: 150,
+            text: 'cross gap',
+            sentence_id: 2,
+            sentence_end: false,
+        }));
+
+        assert.deepEqual(
+            transcripts.map(value => [value.audioStartMs, value.audioEndMs]),
+            [[900, 1_000], [50, 950]],
+        );
+    });
+
     test('never exposes unprovable server time as cross-speaker audio metadata', () => {
         const h = makeHarness();
         const { socket, taskId } = startTask(h, pcm(100));
@@ -303,7 +334,9 @@ describe('AlibabaFunAsrStreamingSTT', () => {
         const h = makeHarness();
         const { socket, taskId } = startTask(h);
         const transcripts = [];
+        const warnings = [];
         h.stt.on('transcript', value => transcripts.push(value));
+        h.stt.on('warning', value => warnings.push(value));
         socket.message(result(taskId, {
             begin_time: 10,
             end_time: null,
@@ -313,6 +346,16 @@ describe('AlibabaFunAsrStreamingSTT', () => {
         assert.deepEqual(transcripts, [{
             text: 'still speaking', isFinal: false, confidence: 1, segmentId: 1,
         }]);
+        assert.deepEqual(warnings, [{
+            kind: 'alibaba-streaming-warning',
+            code: 'unmapped-server-time',
+            generation: 1,
+            taskId,
+        }]);
+        const serialized = JSON.stringify(warnings);
+        assert.equal(serialized.includes('still speaking'), false);
+        assert.equal(serialized.includes('fake-alibaba-api-key'), false);
+        assert.equal(serialized.includes('begin_time'), false);
     });
 
     test('heartbeat and empty text refresh liveness without emitting transcripts', () => {
@@ -334,9 +377,11 @@ describe('AlibabaFunAsrStreamingSTT', () => {
         assert.deepEqual(h.timers.delays(), [1_000]);
     });
 
-    test('finalize is idempotent, sends finish once, and waits for matching trailing task-finished', async () => {
+    test('finalize sends finish once, drains trailing results, and waits for matching task-finished', async () => {
         const h = makeHarness();
         const { socket, taskId } = startTask(h);
+        const transcripts = [];
+        h.stt.on('transcript', value => transcripts.push(value));
         const first = h.stt.finalize();
         const second = h.stt.finalize();
         assert.equal(first, second);
@@ -347,6 +392,11 @@ describe('AlibabaFunAsrStreamingSTT', () => {
         first.finally(() => { settled = true; });
         await Promise.resolve();
         assert.equal(settled, false);
+        socket.message(result(taskId, { begin_time: 10, end_time: 90, text: 'trailing final' }));
+        await Promise.resolve();
+        assert.deepEqual(transcripts.map(value => value.text), ['trailing final']);
+        assert.equal(settled, false);
+        assert.equal(finishFrames(socket).length, 1);
         socket.message({ header: { event: 'task-finished', task_id: taskId }, payload: {} });
         await first;
         assert.equal(settled, true);
@@ -498,6 +548,18 @@ describe('AlibabaFunAsrStreamingSTT', () => {
         h.timers.advance(70_000);
         assert.equal(h.sockets.length, 1);
         h.timers.advance(5_000);
+        assert.deepEqual(h.timers.delays(), [1_000]);
+    });
+
+    test('watchdog starts when run-task is sent even if task-started never arrives', () => {
+        const h = makeHarness();
+        h.stt.write(pcm(100));
+        const socket = h.sockets[0];
+        socket.open();
+
+        h.timers.advance(75_000);
+
+        assert.equal(socket.closeCalls.length, 1);
         assert.deepEqual(h.timers.delays(), [1_000]);
     });
 
