@@ -50,6 +50,16 @@ test('preload setSttProvider implementation accepts the Fun-ASR provider', () =>
   assert.match(implementation, /ipcRenderer\.invoke\('set-stt-provider', provider\)/);
 });
 
+test('SettingsOverlay accepts the stored Fun-ASR provider only in its state and change-handler types', () => {
+  const overlay = read('src/components/SettingsOverlay.tsx');
+  const stateLine = overlay.match(/const \[sttProvider, setSttProvider\] = useState<[^\n]+/)?.[0] || '';
+  const handlerLine = overlay.match(/const handleSttProviderChange = async \(provider: [^\n]+/)?.[0] || '';
+  assert.match(stateLine, /'alibaba-fun-asr'/);
+  assert.match(handlerLine, /'alibaba-fun-asr'/);
+  assert.equal((overlay.match(/alibaba-fun-asr/g) || []).length, 2,
+    'type compatibility must not add a provider option, field, or rendering branch');
+});
+
 test('connection helper never recognizes the renderer stored-key sentinel', () => {
   const helper = read('electron/audio/alibabaFunAsrConnectionTest.ts');
   assert.doesNotMatch(helper, /__USE_STORED__/);
