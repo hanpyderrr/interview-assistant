@@ -179,6 +179,7 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
     private segmentId = 0;
     private stopped = false;
     private authFatal = false;
+    private reconnectExhausted = false;
     private writeClosed = true;
 
     constructor(options: AlibabaFunAsrStreamingSTTOptions) {
@@ -250,12 +251,15 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
         this.segmentId = 0;
         this.reconnectAttempts = 0;
         this.authFatal = false;
+        this.reconnectExhausted = false;
         this.stopped = false;
         this.writeClosed = false;
     }
 
     public write(bytes: Buffer): void {
         if (this.stopped) throw new Error('Alibaba streaming STT has been stopped');
+        if (this.authFatal) throw new Error('Alibaba streaming STT is terminal after authentication failure');
+        if (this.reconnectExhausted) throw new Error('Alibaba streaming STT reconnect attempts are exhausted');
         if (this.writeClosed) throw new Error('Alibaba streaming STT write gate is closed for finalization');
         if (this.captureGeneration === undefined) throw new Error('Capture session has not begun');
         const chunk = this.timeline.stamp(this.channel, bytes, this.sampleRate, this.monotonicNow());
@@ -298,7 +302,13 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
 
     private connect(): void {
         const captureGeneration = this.captureGeneration;
-        if (captureGeneration === undefined || this.stopped || this.authFatal || this.socket) return;
+        if (
+            captureGeneration === undefined
+            || this.stopped
+            || this.authFatal
+            || this.reconnectExhausted
+            || this.socket
+        ) return;
         const connectionGeneration = ++this.connectionGeneration;
         const taskId = this.uuid();
         const task: TaskState = {
@@ -342,13 +352,10 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
             if (!this.matches(socket, task)) return;
             if (response?.statusCode === 401 || response?.statusCode === 403) {
                 this.authFatal = true;
-                this.clearReconnectTimer();
-                this.clearWatchdog();
-                this.socket = null;
-                this.task = null;
-                try { socket.close(); } catch { /* best effort */ }
+                this.writeClosed = true;
                 const error = this.codedError('alibaba-auth-failed', `Alibaba authentication failed (${response.statusCode})`);
                 this.settleFinalize(error);
+                this.terminateTask(socket, task);
                 this.emit('error', error);
             }
         });
@@ -490,6 +497,10 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
     private scheduleReconnect(): void {
         if (this.reconnectTimer || this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
             if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                this.reconnectExhausted = true;
+                this.writeClosed = true;
+                this.queue = [];
+                this.queuedDurationMs = 0;
                 this.emitWarning({ code: 'reconnect-exhausted' });
             }
             return;
@@ -499,7 +510,12 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
         this.reconnectAttempts++;
         this.reconnectTimer = this.timers.setTimeout(() => {
             this.reconnectTimer = undefined;
-            if (!this.stopped && !this.authFatal && this.queue.length > 0) this.connect();
+            if (
+                !this.stopped
+                && !this.authFatal
+                && !this.reconnectExhausted
+                && this.queue.length > 0
+            ) this.connect();
         }, delay);
     }
 

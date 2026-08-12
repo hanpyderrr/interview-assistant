@@ -644,6 +644,15 @@ describe('AlibabaFunAsrStreamingSTT', () => {
         assert.deepEqual(observed, [2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000, 30_000, 30_000]);
         h.sockets.at(-1).serverClose(1006, 'network');
         assert.equal(h.timers.jobs.size, 0);
+        const exhaustedSocketCount = h.sockets.length;
+        assert.throws(() => h.stt.write(pcm(10)), /reconnect|exhaust/i);
+        assert.equal(h.sockets.length, exhaustedSocketCount);
+
+        h.timeline.beginSession(2, 5_000);
+        h.stt.beginCaptureSession(2, 5_000);
+        h.setMonotonic(5_100);
+        h.stt.write(pcm(10));
+        assert.equal(h.sockets.length, exhaustedSocketCount + 1);
     });
 
     test('disconnect before task-started drops old queued audio and empty backoff does not create a task', () => {
@@ -677,13 +686,18 @@ describe('AlibabaFunAsrStreamingSTT', () => {
             const h = makeHarness();
             h.stt.write(pcm(100));
             const errors = [];
+            const warnings = [];
             h.stt.on('error', error => errors.push(error));
+            h.stt.on('warning', warning => warnings.push(warning));
             h.sockets[0].emit('unexpected-response', {}, { statusCode });
             assert.equal(h.timers.jobs.size, 0);
             assert.equal(errors.length, 1);
             assert.equal(errors[0].code, 'alibaba-auth-failed');
             assert.equal(errors[0].message.includes(String(statusCode)), true);
             assert.equal(errors[0].message.includes('fake-alibaba-api-key'), false);
+            assert.throws(() => h.stt.write(pcm(6_000)), /auth|closed|terminal/i);
+            assert.equal(h.sockets.length, 1);
+            assert.deepEqual(warnings, []);
         }
     });
 
