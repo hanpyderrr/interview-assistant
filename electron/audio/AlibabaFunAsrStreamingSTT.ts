@@ -350,14 +350,26 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
         });
         socket.on('unexpected-response', (_request, response: { statusCode?: number }) => {
             if (!this.matches(socket, task)) return;
-            if (response?.statusCode === 401 || response?.statusCode === 403) {
+            const statusCode = response?.statusCode;
+            if (statusCode === 401 || statusCode === 403) {
                 this.authFatal = true;
                 this.writeClosed = true;
-                const error = this.codedError('alibaba-auth-failed', `Alibaba authentication failed (${response.statusCode})`);
+                const error = this.codedError('alibaba-auth-failed', `Alibaba authentication failed (${statusCode})`);
                 this.settleFinalize(error);
                 this.terminateTask(socket, task);
                 this.emit('error', error);
+                return;
             }
+            const wasFinalizing = this.writeClosed;
+            const statusLabel = Number.isInteger(statusCode) ? String(statusCode) : 'unknown';
+            const error = this.codedError(
+                'alibaba-handshake-failed',
+                `Alibaba WebSocket handshake failed (${statusLabel})`,
+                task.taskId,
+            );
+            this.settleFinalize(error);
+            this.terminateTask(socket, task);
+            if (!wasFinalizing) this.scheduleReconnect();
         });
     }
 
@@ -491,10 +503,11 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
         if (this.finalizeState) {
             this.settleFinalize(this.codedError('alibaba-socket-closed', `Alibaba socket closed (${code})`, task.taskId));
         }
-        if (!this.stopped && !this.authFatal && code !== 1000) this.scheduleReconnect();
+        if (!this.stopped && !this.authFatal && !this.writeClosed && code !== 1000) this.scheduleReconnect();
     }
 
     private scheduleReconnect(): void {
+        if (this.writeClosed) return;
         if (this.reconnectTimer || this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
             if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
                 this.reconnectExhausted = true;
@@ -514,6 +527,7 @@ export class AlibabaFunAsrStreamingSTT extends EventEmitter {
                 !this.stopped
                 && !this.authFatal
                 && !this.reconnectExhausted
+                && !this.writeClosed
                 && this.queue.length > 0
             ) this.connect();
         }, delay);

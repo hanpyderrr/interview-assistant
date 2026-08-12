@@ -701,6 +701,65 @@ describe('AlibabaFunAsrStreamingSTT', () => {
         }
     });
 
+    test('handles 429 and 500 handshake responses as retryable bounded failures', () => {
+        for (const statusCode of [429, 500]) {
+            const h = makeHarness();
+            h.stt.write(pcm(100));
+            const socket = h.sockets[0];
+
+            socket.emit('unexpected-response', {}, { statusCode });
+
+            assert.equal(socket.closeCalls.length, 1);
+            assert.deepEqual(h.timers.delays(), [1_000]);
+        }
+    });
+
+    test('retryable handshake failure rejects finalize without scheduling reconnect', async () => {
+        const h = makeHarness();
+        h.stt.write(pcm(100));
+        const socket = h.sockets[0];
+        const finalized = h.stt.finalize();
+
+        socket.emit('unexpected-response', {}, { statusCode: 500 });
+
+        await assert.rejects(finalized, error => {
+            assert.equal(error.code, 'alibaba-handshake-failed');
+            assert.equal(error.message.includes('500'), true);
+            assert.equal(error.message.includes('fake-alibaba-api-key'), false);
+            return true;
+        });
+        assert.equal(socket.closeCalls.length, 1);
+        assert.equal(h.timers.jobs.size, 0);
+    });
+
+    test('stale unexpected-response cannot terminate or schedule retries for a new generation', () => {
+        const h = makeHarness();
+        h.stt.write(pcm(100));
+        const oldSocket = h.sockets[0];
+        h.timeline.beginSession(2, 5_000);
+        h.stt.beginCaptureSession(2, 5_000);
+        h.setMonotonic(5_100);
+        h.stt.write(pcm(100));
+        const currentSocket = h.sockets[1];
+
+        oldSocket.emit('unexpected-response', {}, { statusCode: 500 });
+
+        assert.equal(currentSocket.closeCalls.length, 0);
+        assert.equal(h.timers.jobs.size, 0);
+        assert.doesNotThrow(() => h.stt.write(pcm(10)));
+    });
+
+    test('socket close during finalize does not schedule a reconnect timer', async () => {
+        const h = makeHarness();
+        const { socket } = startTask(h);
+        const finalized = h.stt.finalize();
+
+        socket.serverClose(1006, 'network');
+
+        await assert.rejects(finalized, error => error.code === 'alibaba-socket-closed');
+        assert.equal(h.timers.jobs.size, 0);
+    });
+
     test('watchdog reconnects after 75 seconds and any parseable event refreshes liveness', () => {
         const h = makeHarness();
         const { socket, taskId } = startTask(h);
