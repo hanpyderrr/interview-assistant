@@ -50,6 +50,25 @@ test('preload setSttProvider implementation accepts the Fun-ASR provider', () =>
   assert.match(implementation, /ipcRenderer\.invoke\('set-stt-provider', provider\)/);
 });
 
+test('preload ElectronAPI interface matches the exposed Fun-ASR runtime contract', () => {
+  const preload = read('electron/preload.ts');
+  const interfaceStart = preload.indexOf('interface ElectronAPI');
+  const interfaceEnd = preload.indexOf('contextBridge.exposeInMainWorld', interfaceStart);
+  const runtimeStart = interfaceEnd;
+  const contract = preload.slice(interfaceStart, interfaceEnd);
+  const runtime = preload.slice(runtimeStart);
+
+  assert.match(contract, /hasAlibabaFunAsrKey\??: boolean/);
+  assert.match(contract, /setAlibabaFunAsrApiKey: \(apiKey: string\)/);
+  assert.match(contract, /getAlibabaFunAsrConfig: \(\) => Promise<AlibabaFunAsrPublicConfig>/);
+  assert.match(contract, /setAlibabaFunAsrConfig: \(config: AlibabaFunAsrPublicConfig\)/);
+  assert.match(contract, /testSttConnection:[\s\S]*?'alibaba-fun-asr'[\s\S]*?regionOrConfig\?: string \| AlibabaFunAsrPublicConfig/);
+
+  for (const name of ['setAlibabaFunAsrApiKey', 'getAlibabaFunAsrConfig', 'setAlibabaFunAsrConfig', 'testSttConnection']) {
+    assert.match(runtime, new RegExp(`${name}:`));
+  }
+});
+
 test('SettingsOverlay accepts the stored Fun-ASR provider only in its state and change-handler types', () => {
   const overlay = read('src/components/SettingsOverlay.tsx');
   const stateLine = overlay.match(/const \[sttProvider, setSttProvider\] = useState<[^\n]+/)?.[0] || '';

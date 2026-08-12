@@ -243,6 +243,7 @@ interface ElectronAPI {
     hasIbmWatsonKey: boolean;
     ibmWatsonRegion: string;
     hasSonioxKey: boolean;
+    hasAlibabaFunAsrKey?: boolean;
   }>;
   // Free Trial
   startTrial: () => Promise<{
@@ -367,11 +368,14 @@ interface ElectronAPI {
   setIbmWatsonApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
   setGroqSttModel: (model: string) => Promise<{ success: boolean; error?: string }>;
   setSonioxApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
+  setAlibabaFunAsrApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
+  getAlibabaFunAsrConfig: () => Promise<AlibabaFunAsrPublicConfig>;
+  setAlibabaFunAsrConfig: (config: AlibabaFunAsrPublicConfig) => Promise<{ success: boolean; error?: string }>;
   setIbmWatsonRegion: (region: string) => Promise<{ success: boolean; error?: string }>;
   testSttConnection: (
-    provider: 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox',
+    provider: 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'alibaba-fun-asr',
     apiKey: string,
-    region?: string,
+    regionOrConfig?: string | AlibabaFunAsrPublicConfig,
   ) => Promise<{ success: boolean; error?: string }>;
 
   // STT Config Events
