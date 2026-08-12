@@ -82,7 +82,7 @@ export interface AlibabaSentenceWord {
 
 export interface AlibabaSentence {
     beginTime: number;
-    endTime: number;
+    endTime: number | null;
     text: string;
     heartbeat: boolean;
     sentenceEnd: boolean;
@@ -300,18 +300,29 @@ function parseSentence(message: Record<string, unknown>): AlibabaSentence | null
         return null;
     }
     const sentence = message.payload.output.sentence;
+    const sentenceEnd = sentence.sentence_end;
+    const endTime = sentence.end_time;
     if (
         !isValidTime(sentence.begin_time)
-        || !isValidTime(sentence.end_time)
-        || sentence.end_time < sentence.begin_time
+        || typeof sentenceEnd !== 'boolean'
         || typeof sentence.text !== 'string'
         || typeof sentence.heartbeat !== 'boolean'
-        || typeof sentence.sentence_end !== 'boolean'
         || !Number.isInteger(sentence.sentence_id)
         || (sentence.sentence_id as number) < 0
         || !Array.isArray(sentence.words)
     ) {
         return null;
+    }
+    let parsedEndTime: number | null;
+    if (endTime === null) {
+        if (sentenceEnd) {
+            return null;
+        }
+        parsedEndTime = null;
+    } else if (!isValidTime(endTime) || endTime < sentence.begin_time) {
+        return null;
+    } else {
+        parsedEndTime = endTime;
     }
 
     const words: AlibabaSentenceWord[] = [];
@@ -342,10 +353,10 @@ function parseSentence(message: Record<string, unknown>): AlibabaSentence | null
 
     return {
         beginTime: sentence.begin_time,
-        endTime: sentence.end_time,
+        endTime: parsedEndTime,
         text: sentence.text,
         heartbeat: sentence.heartbeat,
-        sentenceEnd: sentence.sentence_end,
+        sentenceEnd,
         sentenceId: sentence.sentence_id as number,
         words,
     };

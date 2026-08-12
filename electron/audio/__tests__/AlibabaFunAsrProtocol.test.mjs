@@ -197,6 +197,33 @@ describe('Alibaba Fun-ASR protocol', () => {
         });
     });
 
+    test('accepts partial and heartbeat sentences with null end times', () => {
+        const parseSentence = (heartbeat) => parseAlibabaServerEvent({
+            header: { event: 'result-generated', task_id: TASK_ID },
+            payload: {
+                output: {
+                    sentence: {
+                        begin_time: 10,
+                        end_time: null,
+                        text: heartbeat ? '' : 'partial',
+                        heartbeat,
+                        sentence_end: false,
+                        sentence_id: 8,
+                        words: [],
+                    },
+                },
+            },
+        });
+
+        for (const heartbeat of [false, true]) {
+            const result = parseSentence(heartbeat);
+            assert.equal(result.ok, true);
+            assert.equal(result.event.sentence.endTime, null);
+            assert.equal(result.event.sentence.heartbeat, heartbeat);
+            assert.equal(result.event.sentence.sentenceEnd, false);
+        }
+    });
+
     test('returns typed protocol errors for unknown or malformed events without raw frames', () => {
         const raw = JSON.stringify({
             header: { event: 'surprise', task_id: TASK_ID, secret: 'fake-alibaba-api-key' },
@@ -238,6 +265,7 @@ describe('Alibaba Fun-ASR protocol', () => {
             { begin_time: -1 },
             { begin_time: Number.POSITIVE_INFINITY },
             { begin_time: 30, end_time: 20 },
+            { end_time: null, sentence_end: true },
             { text: 1 },
             { heartbeat: 'false' },
             { sentence_end: 1 },
