@@ -31,6 +31,7 @@ export async function generateAnswer(request, {
   apiKey,
   model = DEFAULT_MODEL,
   fetchImpl = fetch,
+  signal,
 } = {}) {
   if (!apiKey) throw new Error('INTERVIEW_LLM_API_KEY is required');
   const url = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
@@ -38,6 +39,7 @@ export async function generateAnswer(request, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify(buildChatRequest(request, model)),
+    signal,
   });
   if (!response.ok) throw new Error(`provider request failed (${response.status})`);
   const payload = await response.json();

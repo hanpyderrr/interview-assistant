@@ -28,6 +28,8 @@
     "test:intelligence": "npm run build:electron && node --test \"electron/intelligence/__tests__/**/*.test.mjs\"",
     "test:lib": "node --experimental-strip-types --test \"src/lib/**/__tests__/**/*.test.mjs\"",
     "test:scripts": "node --test \"scripts/__tests__/**/*.test.mjs\"",
+    "test:knowledge-dialog": "node --test scripts/__tests__/knowledge-dialog-*.test.mjs",
+    "validate:knowledge-dialog": "node scripts/knowledge-dialog/run.mjs",
     "transcribe:audio": "node scripts/transcribe-audio.mjs",
     "retrieve:interview": "node scripts/interview-retriever.mjs",
     "prepare:interview": "node scripts/prepare-interview-request.mjs",

@@ -358,6 +358,7 @@ REAL_LONG_SESSION_MANUAL_TEST_REPORT.md
 Untitled-1.md
 
 # Eval, benchmark, and test directories
+validation/knowledge-dialog/results/
 intelligence-eval*/results/
 intelligence-eval/
 intelligence-eval-answer-quality/
@@ -459,6 +460,8 @@ fixtures/
 # before its contents can be.
 !electron/**/__tests__/fixtures/
 !electron/**/__tests__/fixtures/**
+!validation/knowledge-dialog/fixtures/
+!validation/knowledge-dialog/fixtures/**
 tools/
 
 # Vision benchmark source documentation + generated reports

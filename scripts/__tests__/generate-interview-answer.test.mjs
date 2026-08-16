@@ -21,6 +21,7 @@ test('extracts the first chat completion answer', () => {
 
 test('sends request and returns answer with injected fetch', async () => {
   const calls = [];
+  const signal = new AbortController().signal;
   const fetchImpl = async (url, options) => {
     calls.push({ url, options });
     return { ok: true, async json() { return { choices: [{ message: { content: '云端回答' } }] }; } };
@@ -30,10 +31,12 @@ test('sends request and returns answer with injected fetch', async () => {
     apiKey: 'secret-not-printed',
     model: 'model-test',
     fetchImpl,
+    signal,
   });
   assert.equal(result.answer, '云端回答');
   assert.equal(calls[0].url, 'https://example.test/v1/chat/completions');
   assert.equal(calls[0].options.headers.Authorization, 'Bearer secret-not-printed');
+  assert.equal(calls[0].options.signal, signal);
 });
 
 test('rejects an unsuccessful provider response', async () => {
