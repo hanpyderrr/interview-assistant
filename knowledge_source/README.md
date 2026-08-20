@@ -27,7 +27,7 @@ knowledge_source/embedded_kb.jsonl
 
 - 现阶段只使用 `embedded_kb.jsonl`（嵌入式方向）。
 - 方向由设置 `interviewKbDirection`（`userData/settings.json`）决定：`embedded`（默认）或 `ai`。选择的方向对应的 KB 文件缺失时检索报错（fail-closed），不会回退到另一方向。
-- `ai_kb.jsonl` 暂不提供；AI 方向内容保留在主仓 `04_documents/企业求职准备/kb_manifest.json` 中，以后再导出。
+- `ai_kb.jsonl` 暂不提供；AI 方向内容保留在仓库外的私人知识源中，以后再按相同契约导出。
 - 检索运行时带进程级缓存：开发目录文件按 mtime+size 失效，打包（ASAR）内文件按进程生命周期缓存。
 
 ## 导出管道
@@ -35,10 +35,10 @@ knowledge_source/embedded_kb.jsonl
 `embedded_kb.jsonl` 由主仓导出脚本生成（不手工编辑）：
 
 ```powershell
-python E:\workspace\04_documents\企业求职准备\tools\export_kb.py
+python <private-kb-root>\tools\export_kb.py
 ```
 
-脚本读 `kb_manifest.json`，按 `export.directions`（当前 `["embedded"]`）生成 JSONL；覆盖前自动备份到 `E:\workspace\01_projects\interview-assistant\backups\`。
+脚本读私人知识源中的 `kb_manifest.json`，按 `export.directions`（当前 `["embedded"]`）生成 JSONL；覆盖前自动备份到仓库内已忽略的 `backups/`。
 
 ## 注意事项
 
