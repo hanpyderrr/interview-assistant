@@ -11,12 +11,12 @@ export interface QuestionSettlerSnapshot {
   deadlineMs: number | null
 }
 
-const SHORT_TAIL_MAX_CHARS = 14
 const RICH_PENDING_MIN_CHARS = 18
 const QUESTION_SIGNAL = /[?？]|(什么|怎么|如何|为什么|哪些|哪个|哪种|是否|能不能|会不会|有没有|讲讲|介绍|解释|设计|处理|排查|优化)/
 const FOLLOW_UP_SIGNAL = /(为什么|怎么|如何|代价|缺点|风险|优化|举例|展开|具体|线程安全|安全吗|能说|再说|继续)/
 const TECH_SIGNAL = /(RK\s*3568|Buildroot|Linux|C\+\+|Qt|SPI|CRC\s*32|POSIX|UART|PWM|DMA|ECM|TCP|TCSPC|ioctl|read|rootfs|内核|裁剪|设备树|驱动|线程|进程|组件|服务|启动|看门狗|日志|中断|时钟|复位|引脚|电源)/i
 const LOW_INFORMATION_TAIL = /(我看你|我们来看|我們來看|欢迎来到|歡迎來到|小朋友|什么力量|什麼力量|感觉|感覺|贴贴|貼貼)/
+const BACKCHANNEL_ONLY = /^(?:嗯+|啊+|哦+|好+|好的|对+|對+|是的)[。！!？?]*$/
 const REPEATED_SINGLE_CHAR = /(.)\1{5,}/u
 const MULTI_PART_QUESTION_SIGNAL = /(还有|另外|第二个|第三个|以及|并且|顺便|接着|然后|再问|再说一下|第一|其次|最后|同时|再补充|换个角度|and|also|another|second|third|then|follow[-\s]?up)/i
 
@@ -127,8 +127,9 @@ function shouldIgnoreLowInformationTail(
   const normalizedText = normalizeInterviewQuestion(text)
   if (QUESTION_SIGNAL.test(normalizedText) || FOLLOW_UP_SIGNAL.test(normalizedText) || TECH_SIGNAL.test(normalizedText)) return false
 
-  const shortTail = compactLength(normalizedText) <= SHORT_TAIL_MAX_CHARS
-  return LOW_INFORMATION_TAIL.test(normalizedText) || shortTail || isExcessivelyRepetitive(normalizedText)
+  return LOW_INFORMATION_TAIL.test(normalizedText)
+    || BACKCHANNEL_ONLY.test(normalizedText)
+    || isExcessivelyRepetitive(normalizedText)
 }
 
 /**

@@ -65,6 +65,7 @@ export class WindowHelper {
   // Position/Size tracking for Launcher
   private launcherPosition: { x: number; y: number } | null = null;
   private launcherSize: { width: number; height: number } | null = null;
+  private launcherDragOrigin: { x: number; y: number } | null = null;
   // "Maximize" for the launcher is a ratio-preserving ZOOM (largest 3:2 box in
   // the work area), not a native maximize — native maximize fills the work area
   // exactly and would break the 3:2 lock. These two fields are the zoom state
@@ -1204,6 +1205,29 @@ export class WindowHelper {
   // Specific getters if needed
   public getLauncherWindow(): BrowserWindow | null {
     return this.launcherWindow;
+  }
+
+  public beginLauncherWindowDrag(): void {
+    const win = this.launcherWindow;
+    if (!win || win.isDestroyed()) return;
+    const [x, y] = win.getPosition();
+    this.launcherDragOrigin = { x, y };
+  }
+
+  public moveLauncherWindowTo(offsetX: number, offsetY: number): void {
+    const win = this.launcherWindow;
+    if (!win || win.isDestroyed()) return;
+    if (!Number.isFinite(offsetX) || !Number.isFinite(offsetY)) return;
+    if (!this.launcherDragOrigin) this.beginLauncherWindowDrag();
+    const origin = this.launcherDragOrigin;
+    if (!origin) return;
+    const targetX = Math.round(origin.x + offsetX);
+    const targetY = Math.round(origin.y + offsetY);
+    win.setPosition(targetX, targetY);
+  }
+
+  public endLauncherWindowDrag(): void {
+    this.launcherDragOrigin = null;
   }
   public getOverlayWindow(): BrowserWindow | null {
     return this.overlayWindow;

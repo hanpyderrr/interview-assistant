@@ -15,6 +15,19 @@ import { formatEnvelopeForPrompt } from './services/browser-context/formatEnvelo
 import { BrowserMetadataClassifierService } from './services/browser-context/BrowserMetadataClassifierService';
 import type { BrowserContextCategory, SafeWebsiteMetadata } from './services/browser-context/types';
 import { SettingsManager } from './services/SettingsManager';
+import { createKbRetriever, resolveKbFilePath, type KbRetriever } from './knowledge/kbRetriever';
+import {
+  buildCandidateSpeechCleanupPrompt,
+  normalizeCandidateSpeech,
+  shouldCleanupCandidateSpeech,
+  validateCandidateSpeechCleanup,
+} from './interview/candidateSpeechCleanup';
+import {
+  buildTranscriptTextCorrectionPrompt,
+  normalizeTranscriptText,
+  shouldCorrectTranscriptText,
+  validateTranscriptTextCorrection,
+} from './interview/transcriptTextCorrection';
 import { ProviderStatusRegistry } from './services/ProviderStatusRegistry';
 import { SkillsManager } from './services/SkillsManager';
 import { SAFE_DOCUMENT_EXTENSIONS } from './services/SafeDocumentTextExtractor';
@@ -133,7 +146,29 @@ function stripPriorAssistantTurns(snapshot: string): string {
   return kept.join('\n').trim();
 }
 
+// Interview KB retriever singleton. Reads go through injected deps so the
+// service stays testable without Electron; the handler only assembles it.
+let interviewKbRetriever: KbRetriever | undefined;
+function getInterviewKbRetriever(): KbRetriever {
+  if (!interviewKbRetriever) {
+    interviewKbRetriever = createKbRetriever({
+      readFile: (filePath) => fs.readFileSync(filePath, 'utf8'),
+      stat: (filePath) => {
+        try {
+          const st = fs.statSync(filePath);
+          return { mtimeMs: st.mtimeMs, size: st.size };
+        } catch {
+          return null;
+        }
+      },
+    });
+  }
+  return interviewKbRetriever;
+}
+
 export function initializeIpcHandlers(appState: AppState): void {
+  const candidateSpeechCleanupBySender = new Map<number, AbortController>();
+  const transcriptTextCorrectionBySender = new Map<number, AbortController>();
   const safeHandle = (
     channel: string,
     listener: (event: any, ...args: any[]) => Promise<any> | any,
@@ -532,6 +567,143 @@ export function initializeIpcHandlers(appState: AppState): void {
     const { CredentialsManager } = require('./services/CredentialsManager');
     return CredentialsManager.getInstance().getAiResponseLanguage();
   });
+
+  safeHandle('interview:candidate-speech-cleanup', async (event, rawText: string) => {
+    const original = normalizeCandidateSpeech(rawText);
+    const launcherWin = appState.getWindowHelper().getLauncherWindow();
+    const fromLauncher = !!launcherWin
+      && !launcherWin.isDestroyed()
+      && launcherWin.webContents.id === event.sender.id;
+    if (!fromLauncher || !shouldCleanupCandidateSpeech(original)) {
+      return { status: 'original' as const, text: original };
+    }
+
+    const senderId = event.sender.id;
+    candidateSpeechCleanupBySender.get(senderId)?.abort();
+    const controller = new AbortController();
+    candidateSpeechCleanupBySender.set(senderId, controller);
+    const deadline = setTimeout(() => controller.abort(), 8_000);
+    let output = '';
+    try {
+      const llmHelper = appState.processingHelper.getLLMHelper();
+      const prompt = buildCandidateSpeechCleanupPrompt(original);
+      const stream = llmHelper.streamChat(
+        prompt,
+        undefined,
+        undefined,
+        undefined,
+        true,
+        true,
+        [],
+        controller.signal,
+      );
+      for await (const chunk of stream) {
+        if (controller.signal.aborted) break;
+        output += chunk;
+        if (output.length > original.length * 2 + 128) {
+          controller.abort();
+          break;
+        }
+      }
+      if (controller.signal.aborted) return { status: 'original' as const, text: original };
+      const validated = validateCandidateSpeechCleanup(original, output);
+      console.log('[InterviewCleanup] completed', {
+        inputLength: original.length,
+        outputLength: output.length,
+        accepted: validated.valid,
+        reason: validated.reason,
+      });
+      return validated.valid
+        ? { status: 'cleaned' as const, text: validated.text }
+        : { status: 'original' as const, text: original };
+    } catch (error: any) {
+      console.warn('[InterviewCleanup] failed', {
+        inputLength: original.length,
+        aborted: controller.signal.aborted,
+        errorName: error?.name || 'Error',
+      });
+      return { status: 'original' as const, text: original };
+    } finally {
+      clearTimeout(deadline);
+      if (candidateSpeechCleanupBySender.get(senderId) === controller) {
+        candidateSpeechCleanupBySender.delete(senderId);
+      }
+    }
+  });
+
+  safeOn('interview:candidate-speech-cleanup-cancel', (event) => {
+    const controller = candidateSpeechCleanupBySender.get(event.sender.id);
+    controller?.abort();
+    candidateSpeechCleanupBySender.delete(event.sender.id);
+  });
+
+  safeHandle('interview:transcript-text-correction', async (event, rawText: string) => {
+    const original = normalizeTranscriptText(rawText);
+    const launcherWin = appState.getWindowHelper().getLauncherWindow();
+    const fromLauncher = !!launcherWin
+      && !launcherWin.isDestroyed()
+      && launcherWin.webContents.id === event.sender.id;
+    if (!fromLauncher || !shouldCorrectTranscriptText(original)) {
+      return { status: 'original' as const, text: original };
+    }
+
+    const senderId = event.sender.id;
+    transcriptTextCorrectionBySender.get(senderId)?.abort();
+    const controller = new AbortController();
+    transcriptTextCorrectionBySender.set(senderId, controller);
+    const deadline = setTimeout(() => controller.abort(), 8_000);
+    let output = '';
+    try {
+      const llmHelper = appState.processingHelper.getLLMHelper();
+      const stream = llmHelper.streamChat(
+        buildTranscriptTextCorrectionPrompt(original),
+        undefined,
+        undefined,
+        undefined,
+        true,
+        true,
+        [],
+        controller.signal,
+      );
+      for await (const chunk of stream) {
+        if (controller.signal.aborted) break;
+        output += chunk;
+        if (output.length > original.length * 1.5 + 64) {
+          controller.abort();
+          break;
+        }
+      }
+      if (controller.signal.aborted) return { status: 'original' as const, text: original };
+      const validated = validateTranscriptTextCorrection(original, output);
+      console.log('[TranscriptCorrection] completed', {
+        inputLength: original.length,
+        outputLength: output.length,
+        accepted: validated.valid,
+        reason: validated.reason,
+      });
+      return validated.valid
+        ? { status: 'corrected' as const, text: validated.text }
+        : { status: 'original' as const, text: original };
+    } catch (error: any) {
+      console.warn('[TranscriptCorrection] failed', {
+        inputLength: original.length,
+        aborted: controller.signal.aborted,
+        errorName: error?.name || 'Error',
+      });
+      return { status: 'original' as const, text: original };
+    } finally {
+      clearTimeout(deadline);
+      if (transcriptTextCorrectionBySender.get(senderId) === controller) {
+        transcriptTextCorrectionBySender.delete(senderId);
+      }
+    }
+  });
+
+  safeOn('interview:transcript-text-correction-cancel', (event) => {
+    const controller = transcriptTextCorrectionBySender.get(event.sender.id);
+    controller?.abort();
+    transcriptTextCorrectionBySender.delete(event.sender.id);
+  });
   safeHandle(
     'update-content-dimensions',
     async (event, { width, height }: { width: number; height: number }) => {
@@ -697,6 +869,26 @@ export function initializeIpcHandlers(appState: AppState): void {
   // Windows: modal-move-loop bypass) or leave dragging to the OS drag region.
   safeHandle('overlay-group-drag-managed', async () =>
     appState.getWindowHelper().isOverlayGroupDragManaged(),
+  );
+
+  safeHandle(
+    'launcher-window-drag',
+    async (event, delta: { dx?: number; dy?: number; phase?: 'start' | 'move' | 'end' }) => {
+      const helper = appState.getWindowHelper();
+      const launcherWin = helper.getLauncherWindow();
+      const fromLauncher =
+        !!launcherWin && !launcherWin.isDestroyed() && launcherWin.webContents.id === event.sender.id;
+      if (!fromLauncher) return;
+      if (delta?.phase === 'start') {
+        helper.beginLauncherWindowDrag();
+        return;
+      }
+      if (delta?.phase === 'end') {
+        helper.endLauncherWindowDrag();
+        return;
+      }
+      helper.moveLauncherWindowTo(Number(delta?.dx) || 0, Number(delta?.dy) || 0);
+    },
   );
 
   // (Removed) 'animate-overlay-width' — the overlay window is a FIXED WIDTH
@@ -8761,30 +8953,17 @@ export function initializeIpcHandlers(appState: AppState): void {
     if (typeof question !== 'string' || !question.trim()) return { success: false, error: 'Question is empty' };
     const normalizedQuestion = question.trim().slice(0, 1200);
     try {
-      const candidates = [
-        path.join(app.getAppPath(), 'knowledge_source', 'embedded_kb.jsonl'),
-        path.join(process.cwd(), 'knowledge_source', 'embedded_kb.jsonl'),
+      // Knowledge base direction comes from persisted settings (userData),
+      // not from a file inside the read-only packaged knowledge_source.
+      const direction = SettingsManager.getInstance().getInterviewKbDirection();
+      const rootCandidates = [
+        path.join(app.getAppPath(), 'knowledge_source'),
+        path.join(process.cwd(), 'knowledge_source'),
       ];
-      const kbPath = candidates.find((candidate) => fs.existsSync(candidate));
-      if (!kbPath) return { success: false, error: 'Interview knowledge base is unavailable' };
-      const entries = fs.readFileSync(kbPath, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-      const query = normalizedQuestion.toLowerCase().replace(/\s+/g, '');
-      const queryTerms: string[] = (query.match(/[a-z0-9_+#.-]{2,}/g) || [] as string[]).concat(
-        [...query.matchAll(/[\u4e00-\u9fff]{2,}/g)].flatMap((match) => {
-          const text = match[0];
-          return Array.from({ length: Math.max(0, text.length - 1) }, (_, index) => text.slice(index, index + 2));
-        }),
-      );
-      const matches = entries.map((entry: any) => {
-        const keywordText = `${entry.keywords?.join(' ') || ''} ${entry.title || ''} ${entry.content || ''}`.toLowerCase().replace(/\s+/g, '');
-        let score = 0;
-        for (const term of queryTerms) if (keywordText.includes(term)) score += entry.keywords?.some((keyword: string) => keyword.toLowerCase().includes(term)) ? 5 : 1;
-        if (entry.fact_status === 'resume_fact') score += 0.25;
-        return { entry, score };
-      }).filter(({ score }) => score > 0).sort((a, b) => b.score - a.score).slice(0, 5);
-      const context = matches.length
-        ? matches.map(({ entry, score }) => `[${entry.id}] ${entry.title} (score=${score.toFixed(2)}, source=${entry.fact_status})\n${entry.content}`).join('\n\n')
-        : 'No matching resume facts were found. Do not invent personal metrics; mark missing details for the candidate to fill in.';
+      const resolved = resolveKbFilePath(rootCandidates, direction, (candidate) => fs.existsSync(candidate));
+      if ('error' in resolved) return { success: false, error: resolved.error };
+      const { context, matches } = getInterviewKbRetriever().retrieve(normalizedQuestion, resolved.kbPath);
+      console.log(`[interview:retrieve-knowledge] direction=${direction} kb=${resolved.kbPath} hits=${matches.length}`);
       return {
         success: true,
         context,

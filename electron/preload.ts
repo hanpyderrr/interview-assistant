@@ -66,6 +66,11 @@ interface ElectronAPI {
     dy?: number;
     phase?: 'start' | 'move' | 'end';
   }) => Promise<void>;
+  sendLauncherWindowDrag: (delta: {
+    dx?: number;
+    dy?: number;
+    phase?: 'start' | 'move' | 'end';
+  }) => Promise<void>;
   isOverlayGroupDragManaged: () => Promise<boolean>;
   onOverlayUiAction: (callback: (action: { type: string }) => void) => () => void;
   getRecognitionLanguages: () => Promise<Record<string, any>>;
@@ -701,6 +706,10 @@ interface ElectronAPI {
   onGeminiStreamToken: (callback: (token: string, meta?: { streamId?: number }) => void) => () => void;
   onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number }) => void) => () => void;
   onGeminiStreamError: (callback: (error: string, meta?: { streamId?: number | null; source?: string }) => void) => () => void;
+  cleanupCandidateSpeech: (text: string) => Promise<{ status: 'cleaned' | 'original'; text: string }>;
+  cancelCandidateSpeechCleanup: () => void;
+  correctTranscriptText: (text: string) => Promise<{ status: 'corrected' | 'original'; text: string }>;
+  cancelTranscriptTextCorrection: () => void;
 
   onUndetectableChanged: (callback: (state: boolean) => void) => () => void;
   onGroqFastTextChanged: (callback: (enabled: boolean) => void) => () => void;
@@ -1222,6 +1231,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // child window and must drag its parent; Windows: bypasses the modal move loop).
   sendOverlayGroupDrag: (delta: { dx?: number; dy?: number; phase?: 'start' | 'move' | 'end' }) =>
     ipcRenderer.invoke('overlay-group-drag', delta),
+  sendLauncherWindowDrag: (delta: { dx?: number; dy?: number; phase?: 'start' | 'move' | 'end' }) =>
+    ipcRenderer.invoke('launcher-window-drag', delta),
   isOverlayGroupDragManaged: () => ipcRenderer.invoke('overlay-group-drag-managed'),
   onOverlayUiAction: (callback: (action: { type: string }) => void) => {
     const subscription = (_: any, action: { type: string }) => callback(action);
@@ -2083,6 +2094,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     context?: string,
     options?: { skipSystemPrompt?: boolean; ignoreKnowledgeMode?: boolean },
   ) => ipcRenderer.invoke('gemini-chat-stream', message, imagePaths, context, options),
+  cleanupCandidateSpeech: (text: string) => ipcRenderer.invoke('interview:candidate-speech-cleanup', text),
+  cancelCandidateSpeechCleanup: () => ipcRenderer.send('interview:candidate-speech-cleanup-cancel'),
+  correctTranscriptText: (text: string) => ipcRenderer.invoke('interview:transcript-text-correction', text),
+  cancelTranscriptTextCorrection: () => ipcRenderer.send('interview:transcript-text-correction-cancel'),
 
   onGeminiStreamToken: (callback: (token: string, meta?: { streamId?: number }) => void) => {
     // meta is an optional 2nd arg carrying { streamId } (audit finding #3). Existing

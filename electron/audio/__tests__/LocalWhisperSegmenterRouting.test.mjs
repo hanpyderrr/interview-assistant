@@ -41,12 +41,20 @@ test('transcript IPC keeps optional segment timing metadata', () => {
   assert.match(rendererTypes, /audioStartMs/);
 });
 
-test('updates the session audio clock before dispatching segments from a write', () => {
+test('records each PCM chunk before dispatching mapped segments from a write', () => {
   const local = read('electron/audio/LocalWhisperSTT.ts');
   assert.match(
     local,
-    /this\.sessionAudioMs \+= \(f32\.length \/ 16000\) \* 1000;\s*segs\.forEach\(s => this\.dispatchSegment\(s\)\)/,
+    /const chunkDurationMs = \(f32\.length \/ 16000\) \* 1000;\s*this\.captureTimeline\?\.appendChunk\(chunkDurationMs, performance\.now\(\)\);\s*const segs[\s\S]{0,120}?this\.sessionAudioMs \+= chunkDurationMs;\s*segs\.forEach\(s => this\.dispatchSegment\(s\)\)/,
   );
+});
+
+test('prunes the capture ledger only after every segment from the write is mapped', () => {
+  const local = read('electron/audio/LocalWhisperSTT.ts');
+  const dispatchIndex = local.indexOf('segs.forEach(s => this.dispatchSegment(s))');
+  const pruneIndex = local.indexOf('this.captureTimeline?.pruneBefore(');
+  assert.ok(dispatchIndex >= 0);
+  assert.ok(pruneIndex > dispatchIndex);
 });
 
 test('old worker lifecycle callbacks cannot mutate a replacement worker', () => {
@@ -59,7 +67,8 @@ test('old worker lifecycle callbacks cannot mutate a replacement worker', () => 
 test('finals and worker callbacks are isolated by session generation', () => {
   const local = read('electron/audio/LocalWhisperSTT.ts');
   assert.match(local, /private sessionGeneration = 0/);
-  assert.match(local, /const sessionId = \+\+this\.sessionGeneration/);
+  assert.match(local, /beginSession\(meetingGeneration: number, originMonotonicMs: number\)/);
+  assert.match(local, /const sessionId = this\.sessionGeneration/);
   assert.match(local, /sessionId: this\.sessionGeneration/);
   assert.match(local, /metadata\.sessionId !== this\.sessionGeneration/);
   assert.match(local, /filter\(\(\{ metadata \}\) => metadata\.sessionId === this\.sessionGeneration\)/);

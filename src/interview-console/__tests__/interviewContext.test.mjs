@@ -156,6 +156,22 @@ test('context is newest-first selected but rendered in chronological order and b
   assert.ok(context.indexOf('Question two') < context.indexOf('Answer two'));
 });
 
+test('candidate speech can be excluded without consuming the interviewer turn budget', () => {
+  const turns = [
+    { speaker: 'interviewer', text: 'Question one', final: true },
+    { speaker: 'user', text: 'Answer one', final: true },
+    { speaker: 'interviewer', text: 'Question two', final: true },
+    { speaker: 'user', text: 'Answer two', final: true },
+  ];
+
+  const context = buildRecentInterviewContext(turns, {
+    maxTurns: 2,
+    includeCandidateSpeech: false,
+  });
+
+  assert.equal(context, 'Interviewer: Question one\nInterviewer: Question two');
+});
+
 test('only interviewer final segments trigger a new answer', () => {
   assert.equal(shouldTriggerInterviewAnswer('interviewer', true), true);
   assert.equal(shouldTriggerInterviewAnswer('interviewer', false), false);

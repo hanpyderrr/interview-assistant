@@ -37,6 +37,7 @@ import { Disclosure, DisclosureChevron } from './ui/AccordionSection';
 import { ProfileVisualizer, PremiumUpgradeModal } from '../premium';
 import GlassEffectLayer from './ui/GlassEffectLayer';
 import icon from './icon.png';
+import type { AlibabaFunAsrModel, AlibabaFunAsrPublicConfig, AlibabaFunAsrRegion } from '../types/electron';
 
 // ---------------------------------------------------------------------------
 // StarRating — renders filled/empty stars for culture ratings
@@ -256,9 +257,10 @@ interface ProviderSelectProps {
     value: string;
     options: ProviderOption[];
     onChange: (value: string) => void;
+    disabled?: boolean;
 }
 
-const ProviderSelect: React.FC<ProviderSelectProps> = ({ value, options, onChange }) => {
+const ProviderSelect: React.FC<ProviderSelectProps> = ({ value, options, onChange, disabled }) => {
     const t = useT();
     const isLight = useResolvedTheme() === 'light';
     const [isOpen, setIsOpen] = useState(false);
@@ -308,7 +310,8 @@ const ProviderSelect: React.FC<ProviderSelectProps> = ({ value, options, onChang
         <div ref={containerRef} className="relative z-20 font-sans">
             <button
                 onClick={() => setIsOpen(!isOpen)}
-                className={`w-full group bg-bg-input border border-border-subtle hover:border-border-muted shadow-sm rounded-xl p-2.5 pr-3.5 flex items-center justify-between transition-all duration-200 outline-none focus:ring-2 focus:ring-accent-border ${isOpen ? 'ring-2 ring-accent-border border-accent-focus' : 'hover:shadow-md'}`}
+                disabled={disabled}
+                className={`w-full group bg-bg-input border border-border-subtle hover:border-border-muted shadow-sm rounded-xl p-2.5 pr-3.5 flex items-center justify-between transition-all duration-200 outline-none focus:ring-2 focus:ring-accent-border disabled:opacity-50 disabled:cursor-not-allowed ${isOpen ? 'ring-2 ring-accent-border border-accent-focus' : 'hover:shadow-md'}`}
             >
                 {selected ? (
                     <div className="flex items-center gap-3 overflow-hidden">
@@ -1040,8 +1043,22 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     const [hasStoredIbmWatsonKey, setHasStoredIbmWatsonKey] = useState(false);
     const [sttSonioxKey, setSttSonioxKey] = useState('');
     const [hasStoredSonioxKey, setHasStoredSonioxKey] = useState(false);
+    const [sttAlibabaKey, setSttAlibabaKey] = useState('');
+    const [hasStoredAlibabaKey, setHasStoredAlibabaKey] = useState(false);
+    const alibabaSaveInFlightRef = useRef(false);
+    const [alibabaRegion, setAlibabaRegion] = useState<AlibabaFunAsrRegion>('cn-beijing');
+    const [alibabaModel, setAlibabaModel] = useState<AlibabaFunAsrModel>('fun-asr-realtime');
+    const [alibabaWorkspaceId, setAlibabaWorkspaceId] = useState('');
+    const [alibabaVocabularyId, setAlibabaVocabularyId] = useState('');
     const [isSttDropdownOpen, setIsSttDropdownOpen] = useState(false);
     const sttDropdownRef = React.useRef<HTMLDivElement>(null);
+
+    const alibabaConfig: AlibabaFunAsrPublicConfig = {
+        region: alibabaRegion,
+        model: alibabaModel,
+        workspaceId: alibabaWorkspaceId.trim(),
+        ...(alibabaVocabularyId.trim() ? { vocabularyId: alibabaVocabularyId.trim() } : {}),
+    };
 
     // Close STT dropdown when clicking outside
     useEffect(() => {
@@ -1074,6 +1091,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                     if (creds.azureRegion) setSttAzureRegion(creds.azureRegion);
                     setHasStoredIbmWatsonKey(creds.hasIbmWatsonKey);
                     setHasStoredSonioxKey(creds.hasSonioxKey || false);
+                    setHasStoredAlibabaKey(creds.hasAlibabaFunAsrKey || false);
 
                     setHasNativelyKey(creds.hasNativelyKey || false);
                     // Do NOT pre-populate STT key fields from stored credentials.
@@ -1083,6 +1101,13 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                     // The hasStoredXxxKey booleans already show the "Saved" badge and set the
                     // placeholder to "••••••••••••" — that is sufficient UX feedback.
                     if (typeof creds.openAiSttBaseUrl === 'string') setSttOpenaiBaseUrl(creds.openAiSttBaseUrl);
+                }
+                const alibaba = await window.electronAPI?.getAlibabaFunAsrConfig?.();
+                if (alibaba) {
+                    setAlibabaRegion(alibaba.region);
+                    setAlibabaModel(alibaba.model);
+                    setAlibabaWorkspaceId(alibaba.workspaceId);
+                    setAlibabaVocabularyId(alibaba.vocabularyId || '');
                 }
             } catch (e) {
                 console.error('Failed to load STT settings:', e);
@@ -1111,6 +1136,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                     setHasStoredAzureKey(creds.hasAzureKey);
                     setHasStoredIbmWatsonKey(creds.hasIbmWatsonKey);
                     setHasStoredSonioxKey(creds.hasSonioxKey || false);
+                    setHasStoredAlibabaKey(creds.hasAlibabaFunAsrKey || false);
                 }).catch(() => { /* silently ignore */ });
             }
         });
@@ -1118,10 +1144,13 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     }, []); // mount-once: isOpen is checked inside the callback
 
     const handleSttProviderChange = async (provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local-whisper' | 'alibaba-fun-asr') => {
+        if (alibabaSaveInFlightRef.current) return;
+        setSttSaved(false);
         setSttProvider(provider);
         setIsSttDropdownOpen(false);
         setSttTestStatus('idle');
         setSttTestError('');
+        if (provider === 'alibaba-fun-asr') return;
         try {
             // @ts-ignore
             await window.electronAPI?.setSttProvider?.(provider);
@@ -1263,6 +1292,73 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
         }
     };
 
+    const handleSaveAlibabaSettings = async () => {
+        if (!alibabaWorkspaceId.trim()) {
+            setSttTestStatus('error');
+            setSttTestError('Workspace ID is required.');
+            return;
+        }
+        if (!sttAlibabaKey.trim() && !hasStoredAlibabaKey) {
+            setSttTestStatus('error');
+            setSttTestError('Please enter your Alibaba Cloud API key.');
+            return;
+        }
+
+        if (alibabaSaveInFlightRef.current) return;
+        alibabaSaveInFlightRef.current = true;
+        setSttSaved(false);
+        setSttSaving(true);
+        setSttTestStatus('idle');
+        setSttTestError('');
+        try {
+            const configResult = await window.electronAPI?.setAlibabaFunAsrConfig?.(alibabaConfig);
+            if (!configResult?.success) {
+                throw new Error(configResult?.error || 'Could not save Alibaba Fun-ASR configuration.');
+            }
+
+            if (sttAlibabaKey.trim()) {
+                const keyResult = await window.electronAPI?.setAlibabaFunAsrApiKey?.(sttAlibabaKey.trim());
+                if (!keyResult?.success) {
+                    throw new Error(keyResult?.error || 'Could not save Alibaba Fun-ASR API key.');
+                }
+                setHasStoredAlibabaKey(true);
+                setSttAlibabaKey('');
+            }
+
+            const providerResult = await window.electronAPI?.setSttProvider?.('alibaba-fun-asr');
+            if (!providerResult?.success) {
+                throw new Error(providerResult?.error || 'Could not enable Alibaba Fun-ASR.');
+            }
+            setSttSaved(true);
+            setTimeout(() => setSttSaved(false), 2000);
+        } catch (error: any) {
+            setSttSaved(false);
+            setSttTestStatus('error');
+            setSttTestError(error?.message || 'Could not save Alibaba Fun-ASR settings.');
+        } finally {
+            alibabaSaveInFlightRef.current = false;
+            setSttSaving(false);
+        }
+    };
+
+    const handleRemoveAlibabaKey = async () => {
+        if (alibabaSaveInFlightRef.current) return;
+        if (!confirm('Are you sure you want to remove the Alibaba Fun-ASR API key?')) return;
+        try {
+            const result = await window.electronAPI?.setAlibabaFunAsrApiKey?.('');
+            if (!result?.success) {
+                throw new Error(result?.error || 'Could not remove Alibaba Fun-ASR API key.');
+            }
+            setSttAlibabaKey('');
+            setHasStoredAlibabaKey(false);
+            setSttTestStatus('idle');
+            setSttTestError('');
+        } catch (error: any) {
+            setSttTestStatus('error');
+            setSttTestError(error?.message || 'Could not remove Alibaba Fun-ASR API key.');
+        }
+    };
+
     const handleRemoveTavilyKey = async () => {
         if (!confirm('Are you sure you want to remove the Tavily API Key?')) return;
 
@@ -1276,13 +1372,20 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     };
 
     const handleTestSttConnection = async () => {
+        if (alibabaSaveInFlightRef.current) return;
         if (sttProvider === 'none' || sttProvider === 'google' || sttProvider === 'natively' || sttProvider === 'local-whisper') return;
         const keyMap: Record<string, string> = {
             groq: sttGroqKey, openai: sttOpenaiKey, deepgram: sttDeepgramKey,
             elevenlabs: sttElevenLabsKey, azure: sttAzureKey, ibmwatson: sttIbmKey,
-            soniox: sttSonioxKey,
+            soniox: sttSonioxKey, 'alibaba-fun-asr': sttAlibabaKey,
         };
         const keyToTest = keyMap[sttProvider]?.trim() || '';
+
+        if (sttProvider === 'alibaba-fun-asr' && !alibabaWorkspaceId.trim()) {
+            setSttTestStatus('error');
+            setSttTestError('Workspace ID is required before testing the connection.');
+            return;
+        }
 
         // If the input field is empty post-restart (the #318 fix intentionally
         // does NOT pre-populate masked values) but a key IS on disk, ask the
@@ -1300,6 +1403,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                 case 'azure':      return hasStoredAzureKey;
                 case 'ibmwatson':  return hasStoredIbmWatsonKey;
                 case 'soniox':     return hasStoredSonioxKey;
+                case 'alibaba-fun-asr': return hasStoredAlibabaKey;
                 default:           return false;
             }
         })();
@@ -1307,9 +1411,9 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
         // Pick the key to send: explicit input if present, otherwise the
         // sentinel (the IPC will resolve to the persisted key, or fail clean
         // with a "no key saved" error).
-        const apiKeyToSend = keyToTest
-            ? keyToTest
-            : (hasStoredKeyForCurrentProvider ? '__USE_STORED__' : '');
+        const apiKeyToSend = sttProvider === 'alibaba-fun-asr'
+            ? (keyToTest || (hasStoredAlibabaKey ? '__USE_STORED__' : ''))
+            : (keyToTest || (hasStoredKeyForCurrentProvider ? '__USE_STORED__' : ''));
 
         if (!apiKeyToSend) {
             setSttTestStatus('error');
@@ -1324,7 +1428,9 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
             const result = await window.electronAPI?.testSttConnection?.(
                 sttProvider,
                 apiKeyToSend,
-                sttProvider === 'azure' ? sttAzureRegion : undefined
+                sttProvider === 'azure'
+                    ? sttAzureRegion
+                    : sttProvider === 'alibaba-fun-asr' ? alibabaConfig : undefined
             );
             if (result?.success) {
                 setSttTestStatus('success');
@@ -2623,10 +2729,11 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                             <div className="bg-bg-card rounded-xl border border-border-subtle p-4 space-y-3">
                                                 <label className="text-xs font-medium text-text-secondary block">{t('Speech Provider')}</label>
                                                 <div className="relative">
-                                                    <ProviderSelect
-                                                        value={sttProvider}
-                                                        onChange={(val) => handleSttProviderChange(val as any)}
-                                                        options={[
+                                                     <ProviderSelect
+                                                         value={sttProvider}
+                                                         onChange={(val) => handleSttProviderChange(val as any)}
+                                                         disabled={sttSaving}
+                                                         options={[
                                                             ...(hasNativelyKey ? [{ id: 'natively', label: 'Natively API', badge: 'Saved' as const, recommended: true, desc: t('Managed transcription via Natively backend'), color: 'blue', icon: <Mic size={14} /> }] : []),
                                                             { id: 'google', label: 'Google Cloud', badge: googleServiceAccountPath ? 'Saved' : null, recommended: true, desc: t('gRPC streaming via Service Account'), color: 'blue', icon: <Mic size={14} /> },
                                                             { id: 'groq', label: 'Groq Whisper', badge: hasStoredSttGroqKey ? 'Saved' : null, recommended: true, desc: t('Ultra-fast REST transcription'), color: 'orange', icon: <Mic size={14} /> },
@@ -2634,15 +2741,114 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                             { id: 'deepgram', label: 'Deepgram Nova-3', badge: hasStoredDeepgramKey ? 'Saved' : null, recommended: true, desc: t('High-accuracy REST transcription'), color: 'purple', icon: <Mic size={14} /> },
                                                             { id: 'elevenlabs', label: 'ElevenLabs Scribe', badge: hasStoredElevenLabsKey ? 'Saved' : null, desc: t('Scribe v2 Realtime API'), color: 'teal', icon: <Mic size={14} /> },
                                                             { id: 'azure', label: 'Azure Speech', badge: hasStoredAzureKey ? 'Saved' : null, desc: t('Microsoft Cognitive Services STT'), color: 'cyan', icon: <Mic size={14} /> },
-                                                            { id: 'ibmwatson', label: 'IBM Watson', badge: hasStoredIbmWatsonKey ? 'Saved' : null, desc: t('IBM Watson cloud STT service'), color: 'indigo', icon: <Mic size={14} /> },
-                                                            { id: 'soniox', label: 'Soniox', badge: hasStoredSonioxKey ? 'Saved' : null, recommended: true, desc: t('60+ languages, multilingual, domain context'), color: 'cyan', icon: <Mic size={14} /> },
-                                                            { id: 'local-whisper', label: 'Local Whisper', badge: null, desc: t('Privacy-first: runs 100% on your device'), color: 'green', icon: <Cpu size={14} /> },
-                                                        ]}
-                                                    />
-                                                </div>
-                                            </div>
+                                                             { id: 'ibmwatson', label: 'IBM Watson', badge: hasStoredIbmWatsonKey ? 'Saved' : null, desc: t('IBM Watson cloud STT service'), color: 'indigo', icon: <Mic size={14} /> },
+                                                             { id: 'soniox', label: 'Soniox', badge: hasStoredSonioxKey ? 'Saved' : null, recommended: true, desc: t('60+ languages, multilingual, domain context'), color: 'cyan', icon: <Mic size={14} /> },
+                                                             { id: 'alibaba-fun-asr', label: 'Alibaba Fun-ASR Realtime', badge: hasStoredAlibabaKey ? 'Saved' : null, desc: t('Alibaba Cloud realtime speech recognition'), color: 'orange', icon: <Mic size={14} /> },
+                                                             { id: 'local-whisper', label: 'Local Whisper', badge: null, desc: t('Privacy-first: runs 100% on your device'), color: 'green', icon: <Cpu size={14} /> },
+                                                         ]}
+                                                     />
+                                                 </div>
+                                             </div>
 
-                                            {/* Groq Model Selector */}
+                                             {sttProvider === 'alibaba-fun-asr' && (
+                                                 <div className="bg-bg-card rounded-xl border border-border-subtle p-4 space-y-4">
+                                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                                         <div className="space-y-1.5 min-w-0">
+                                                             <label htmlFor="alibaba-fun-asr-region" className="text-xs font-medium text-text-secondary block">{t('Region')}</label>
+                                                             <select
+                                                                 id="alibaba-fun-asr-region"
+                                                                 value={alibabaRegion}
+                                                                 onChange={(event) => setAlibabaRegion(event.target.value as AlibabaFunAsrRegion)}
+                                                                 className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-primary"
+                                                             >
+                                                                 <option value="cn-beijing">cn-beijing</option>
+                                                                 <option value="ap-southeast-1">ap-southeast-1</option>
+                                                             </select>
+                                                         </div>
+                                                         <div className="space-y-1.5 min-w-0">
+                                                             <label htmlFor="alibaba-fun-asr-model" className="text-xs font-medium text-text-secondary block">{t('Model')}</label>
+                                                             <select
+                                                                 id="alibaba-fun-asr-model"
+                                                                 value={alibabaModel}
+                                                                 onChange={(event) => setAlibabaModel(event.target.value as AlibabaFunAsrModel)}
+                                                                 className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-primary"
+                                                             >
+                                                                 <option value="fun-asr-realtime">fun-asr-realtime</option>
+                                                                 <option value="fun-asr-realtime-2026-02-28">fun-asr-realtime-2026-02-28</option>
+                                                             </select>
+                                                         </div>
+                                                     </div>
+
+                                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                                         <div className="space-y-1.5 min-w-0">
+                                                             <label htmlFor="alibaba-fun-asr-workspace-id" className="text-xs font-medium text-text-secondary block">{t('Workspace ID')}</label>
+                                                             <input
+                                                                 id="alibaba-fun-asr-workspace-id"
+                                                                 type="text"
+                                                                 required
+                                                                 value={alibabaWorkspaceId}
+                                                                 onChange={(event) => setAlibabaWorkspaceId(event.target.value)}
+                                                                 placeholder={t('Enter Workspace ID')}
+                                                                 className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent-primary"
+                                                             />
+                                                         </div>
+                                                         <div className="space-y-1.5 min-w-0">
+                                                             <label htmlFor="alibaba-fun-asr-vocabulary-id" className="text-xs font-medium text-text-secondary block">{t('Vocabulary ID')} <span className="text-text-tertiary">{t('(optional)')}</span></label>
+                                                             <input
+                                                                 id="alibaba-fun-asr-vocabulary-id"
+                                                                 type="text"
+                                                                 value={alibabaVocabularyId}
+                                                                 onChange={(event) => setAlibabaVocabularyId(event.target.value)}
+                                                                 placeholder={t('Enter Vocabulary ID')}
+                                                                 className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent-primary"
+                                                             />
+                                                         </div>
+                                                     </div>
+
+                                                     <div className="space-y-1.5 min-w-0">
+                                                         <label htmlFor="alibaba-fun-asr-api-key" className="text-xs font-medium text-text-secondary block">{t('Alibaba Cloud API Key')}</label>
+                                                         <input
+                                                             id="alibaba-fun-asr-api-key"
+                                                             type="password"
+                                                             value={sttAlibabaKey}
+                                                             onChange={(event) => setSttAlibabaKey(event.target.value)}
+                                                             placeholder={hasStoredAlibabaKey ? '••••••••••••' : t('Enter Alibaba Cloud API key')}
+                                                             className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent-primary"
+                                                         />
+                                                     </div>
+
+                                                     <div className="flex flex-wrap items-center gap-2">
+                                                         <button
+                                                             onClick={handleSaveAlibabaSettings}
+                                                             disabled={sttSaving || !alibabaWorkspaceId.trim() || (!sttAlibabaKey.trim() && !hasStoredAlibabaKey)}
+                                                             className="px-4 py-2 rounded-lg text-xs font-medium bg-bg-input hover:bg-bg-input/80 border border-border-subtle text-text-primary disabled:opacity-50 transition-colors"
+                                                         >
+                                                             {sttSaving ? t('Saving...') : sttSaved ? t('Saved!') : t('Save')}
+                                                         </button>
+                                                         <button
+                                                             onClick={handleTestSttConnection}
+                                                             disabled={sttSaving || sttTestStatus === 'testing'}
+                                                             className="px-4 py-2 rounded-lg text-xs font-medium bg-bg-input hover:bg-bg-elevated text-text-primary disabled:opacity-50 transition-colors"
+                                                         >
+                                                             {sttTestStatus === 'testing' ? t('Testing...') : sttTestStatus === 'success' ? t('Connected') : t('Test Connection')}
+                                                         </button>
+                                                         {hasStoredAlibabaKey && (
+                                                             <button
+                                                                 onClick={handleRemoveAlibabaKey}
+                                                                 disabled={sttSaving}
+                                                                 className="px-4 py-2 rounded-lg text-xs font-medium text-text-tertiary hover:text-red-500 hover:bg-red-500/10 transition-colors"
+                                                             >
+                                                                 {t('Remove API Key')}
+                                                             </button>
+                                                         )}
+                                                         {sttTestStatus === 'error' && (
+                                                             <span role="alert" aria-live="polite" className="text-xs text-red-400">{sttTestError}</span>
+                                                         )}
+                                                     </div>
+                                                 </div>
+                                             )}
+
+                                             {/* Groq Model Selector */}
                                             {sttProvider === 'groq' && (
                                                 <div className="bg-bg-card rounded-xl border border-border-subtle p-4">
                                                     <label className="text-xs font-medium text-text-secondary mb-2.5 block">{t('Whisper Model')}</label>
@@ -2706,7 +2912,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                             )}
 
                                             {/* API Key Input (non-Google providers) */}
-                                            {sttProvider !== 'google' && sttProvider !== 'local-whisper' && sttProvider !== 'natively' && sttProvider !== 'none' && (
+                                            {sttProvider !== 'google' && sttProvider !== 'alibaba-fun-asr' && sttProvider !== 'local-whisper' && sttProvider !== 'natively' && sttProvider !== 'none' && (
                                                 <div className="bg-bg-card rounded-xl border border-border-subtle p-4 space-y-3">
                                                     <label className="text-xs font-medium text-text-secondary block">
                                                         {sttProvider === 'groq' ? 'Groq' : sttProvider === 'openai' ? 'OpenAI STT' : sttProvider === 'elevenlabs' ? 'ElevenLabs' : sttProvider === 'azure' ? 'Azure' : sttProvider === 'ibmwatson' ? 'IBM Watson' : sttProvider === 'soniox' ? 'Soniox' : 'Deepgram'} API Key

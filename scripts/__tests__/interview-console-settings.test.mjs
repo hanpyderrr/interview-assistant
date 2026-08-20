@@ -9,10 +9,18 @@ const consoleSource = fs.readFileSync(
   path.join(repoRoot, 'src', 'interview-console', 'InterviewConsole.tsx'),
   'utf8',
 );
+const consoleStyles = fs.readFileSync(
+  path.join(repoRoot, 'src', 'interview-console', 'InterviewConsole.css'),
+  'utf8',
+);
 const appSource = fs.readFileSync(path.join(repoRoot, 'src', 'App.tsx'), 'utf8');
 const mainSource = fs.readFileSync(path.join(repoRoot, 'electron', 'main.ts'), 'utf8');
 const shortcutsSource = fs.readFileSync(
   path.join(repoRoot, 'src', 'hooks', 'useShortcuts.ts'),
+  'utf8',
+);
+const credentialsSource = fs.readFileSync(
+  path.join(repoRoot, 'electron', 'services', 'CredentialsManager.ts'),
   'utf8',
 );
 
@@ -38,6 +46,8 @@ test('interview console exposes a draggable top bar and keeps buttons no-drag', 
   assert.match(consoleSource, /import WindowControls from '\.\.\/components\/WindowControls'/);
   assert.match(consoleSource, /<div className="topbar-actions no-drag">[\s\S]*<WindowControls \/>[\s\S]*<\/div><\/header>/);
   assert.doesNotMatch(consoleSource, /console-topbar">/);
+  assert.match(consoleStyles, /\.console-topbar[^}]*-webkit-app-region:\s*drag/s);
+  assert.match(consoleStyles, /\.topbar-actions[^}]*-webkit-app-region:\s*no-drag/s);
 });
 
 test('interview console ignores STT prewarm events until it starts a session', () => {
@@ -100,6 +110,11 @@ test('browser preview skips Electron-only shortcut synchronization', () => {
     shortcutsSource,
     /if \(!api\?\.getKeybinds \|\| !api\?\.onKeybindsUpdate\) return/,
   );
+});
+
+test('settings provider contract accepts Alibaba without rendering a new audio option', () => {
+  assert.match(credentialsSource, /getSttProvider\(\):[^\n]*'alibaba-fun-asr'/);
+  assert.doesNotMatch(consoleSource, /value=["']alibaba-fun-asr["']/);
 });
 
 test('interview answers keep their retrieved context out of generic V3 rerouting', () => {

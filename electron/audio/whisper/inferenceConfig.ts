@@ -154,6 +154,15 @@ function resolveAppleSiliconDtype(): string | Record<string, string> | null {
 export function resolveInferenceConfig(): InferenceConfig {
     const { platform, arch } = process;
 
+    // DirectML can terminate the Electron process at the native-runtime layer
+    // on some Windows GPU/driver combinations, especially when back-to-back
+    // meetings briefly overlap worker teardown and startup. Keep the normal
+    // accelerated default, but provide a narrow process-level safety switch
+    // for the source-development launcher and affected installations.
+    if (process.env.NATIVELY_WHISPER_FORCE_CPU === '1') {
+        return { executionProviders: ['cpu'], dtype: WHISPER_SAFE_DTYPE };
+    }
+
     if (platform === 'darwin' && arch === 'arm64') {
         // Apple Silicon — CoreML uses Metal GPU + ANE. Default changed in
         // 2026-07 from uniform fp32 → mixed per-module (fp32 encoder + q8

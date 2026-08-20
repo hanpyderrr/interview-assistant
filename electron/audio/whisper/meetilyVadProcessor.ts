@@ -45,6 +45,7 @@ interface PendingSpeech {
 }
 
 interface OpenSpeech {
+  id: number;
   frames: Frame[];
   trailing: Frame[];
   startMs: number;
@@ -90,7 +91,6 @@ export class MeetilyVadProcessor {
   private pending: PendingSpeech | null = null;
   private open: OpenSpeech | null = null;
   private segmentIdCounter = 0;
-  private sequenceIdCounter = 0;
 
   constructor(options: MeetilyVadOptions = {}) {
     this.positiveThreshold = options.positiveThreshold ?? 0.50;
@@ -177,7 +177,6 @@ export class MeetilyVadProcessor {
     this.pending = null;
     this.open = null;
     this.segmentIdCounter = 0;
-    this.sequenceIdCounter = 0;
   }
 
   isInSpeech(): boolean { return this.open !== null; }
@@ -205,7 +204,9 @@ export class MeetilyVadProcessor {
 
       if (this.pending.positiveMs >= this.minSpeechFrames * FRAME_MS) {
         const pending = this.pending;
+        const segmentId = ++this.segmentIdCounter;
         this.open = {
+          id: segmentId,
           frames: pending.frames,
           trailing: [],
           startMs: pending.startMs,
@@ -215,7 +216,6 @@ export class MeetilyVadProcessor {
         };
         this.pending = null;
         this.preRoll = [];
-        this.segmentIdCounter++;
       }
       return;
     }
@@ -285,7 +285,7 @@ export class MeetilyVadProcessor {
     const segment: MeetilySpeechSegment = {
       samples,
       durationMs: Math.round((samples.length / SAMPLE_RATE) * 1000),
-      sequenceId: ++this.sequenceIdCounter,
+      sequenceId: open.id,
       startMs: open.startMs,
       endMs: last?.endMs ?? open.startMs,
       confidence: open.scoreCount > 0 ? open.scoreSum / open.scoreCount : 0,

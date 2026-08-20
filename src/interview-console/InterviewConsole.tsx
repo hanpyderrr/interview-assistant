@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { useEffect, useMemo, useReducer, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type UIEvent as ReactUIEvent } from 'react'
 import { Activity, ChevronDown, CircleStop, Headphones, History as HistoryIcon, Mic, Play, Radio, RotateCcw, Settings, Sparkles, Timer } from 'lucide-react'
 import { splitGistLineStreaming } from '../lib/displayMarkup'
 import { DEMO_ANSWER, DEMO_HITS, DEMO_QUESTION, DEMO_TRANSCRIPT, type SessionStatus, nextStatusAfterStart } from './demoSession'
-import { appendFinalTurn, buildRecentInterviewContext, isTranscriptAtOrBefore, joinTranscriptTurns, shouldTriggerInterviewAnswer, type InterviewTurn } from './interviewContext'
+import { appendFinalTurn, buildRecentInterviewContext, isTranscriptAtOrBefore, shouldTriggerInterviewAnswer, type InterviewTurn } from './interviewContext'
 import { shouldAcceptQuestionFinal } from './questionTiming'
 import { normalizeInterviewQuestion } from './questionNormalization'
 import { toSimplifiedChinese } from './simplifiedChinese'
@@ -15,12 +15,18 @@ import { answerHistoryReducer, createAnswerHistoryState, getSelectedAnswer, type
 import { createLatencyTrace, DEFAULT_PROVIDER_DEADLINE_MS, type LatencyRecord } from './latencyTelemetry'
 import { recordRoundEvent, resetRoundEvents, recordTranscriptDiagnostics, recordTranscriptResetDiagnostics, computeAcceptedFinalGaps } from './roundEventsWindow'
 import { createQuestionRoundCoordinator, type RoundAction } from './questionRoundCoordinator'
+import { INTERVIEW_FONT_DEFAULTS, INTERVIEW_FONT_MAX, INTERVIEW_FONT_MIN, adjustInterviewFontSize, loadInterviewFontSizes, saveInterviewFontSizes, type InterviewFontSizes } from './interviewFontSettings'
+import { loadCandidateContextEnabled, saveCandidateContextEnabled } from './candidateContextSettings'
+import { createCandidateSpeechCleanupCoordinator, type CandidateCleanupStatus, type CandidateSpeechCleanupCoordinator } from './candidateSpeechCleanup'
+import { createInterviewerDisplayCorrectionCoordinator, type InterviewerDisplayCorrectionCoordinator } from './interviewerDisplayCorrection'
+import { createQuestionCorrectionExtractor, flushResolvedCorrectionExtractor, stripCorrectionSection, type CorrectionExtractor } from './questionCorrectionExtractor'
+import { buildTranscriptDisplayWindow, isNearTranscriptBottom, type TranscriptDisplayWindow } from './transcriptDisplayWindow'
+import { buildLongSessionHealthSnapshot, LONG_SESSION_HEALTH_INTERVAL_MS, type LongSessionHealthSnapshot } from './longSessionHealth'
 import WindowControls from '../components/WindowControls'
 import './InterviewConsole.css'
 
 const STATUS_COPY: Record<SessionStatus, string> = { ready: '准备就绪', recording: '正在采集', transcribing: '识别中', answered: '回答已生成' }
 const formatTime = (seconds: number) => `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`
-const appendTranscriptSegment = (current: string, segment: string) => current.endsWith(segment) ? current : `${current} ${segment}`.trim()
 
 type Hit = InterviewAnswerHit
 type InterviewConsoleProps = { onOpenSettings: (tab: string) => void }
@@ -39,7 +45,12 @@ type InterviewLatencyWindow = Window & {
   __nativelyInterviewLatencyRecords?: LatencyRecord[]
   __nativelyInjectInterviewProviderTimeout?: boolean
   __nativelyInterviewTranscriptEvents?: TranscriptProbeEvent[]
+  __nativelyInterviewHealthSnapshots?: LongSessionHealthSnapshot[]
 }
+
+type PerformanceWithMemory = Performance & { memory?: { usedJSHeapSize?: number } }
+
+const answerExtractorKey = (answerId: number, attemptId: number) => `answer:${answerId}:${attemptId}`
 
 const ANSWER_STATUS_COPY: Record<InterviewAnswerItem['status'], string> = {
   queued: '排队中',
@@ -83,17 +94,71 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
   const [device, setDevice] = useState('扬声器 (Realtek High Definition Audio)')
   const [chunkDuration, setChunkDuration] = useState('1 秒')
   const [elapsed, setElapsed] = useState(0)
-  const [interviewerTranscript, setInterviewerTranscript] = useState('')
-  const [candidateTranscript, setCandidateTranscript] = useState('')
+  const [interviewerTranscriptWindow, setInterviewerTranscriptWindow] = useState<TranscriptDisplayWindow>({ text: '', folded: false })
+  const [candidateTranscriptWindow, setCandidateTranscriptWindow] = useState<TranscriptDisplayWindow>({ text: '', folded: false })
   const [confirmedQuestion, setConfirmedQuestion] = useState('')
   const [answerState, dispatchAnswer] = useReducer(answerHistoryReducer, createAnswerHistoryState(10))
   const [error, setError] = useState('')
   const [showDemo, setShowDemo] = useState(false)
   const [candidateText, setCandidateText] = useState('')
+  const [fontSizes, setFontSizes] = useState<InterviewFontSizes>(() => loadInterviewFontSizes())
+  const [candidateContextEnabled, setCandidateContextEnabled] = useState(() => loadCandidateContextEnabled())
+  const [candidateCleanupStatus, setCandidateCleanupStatus] = useState<CandidateCleanupStatus>('idle')
+  const [followLatestTranscript, setFollowLatestTranscript] = useState(true)
+  const consoleDragHandleRef = useRef<HTMLDivElement | null>(null)
+  const transcriptScrollRef = useRef<HTMLDivElement | null>(null)
+  const transcriptDisplayRef = useRef({ interviewer: interviewerTranscriptWindow, candidate: candidateTranscriptWindow })
+  transcriptDisplayRef.current = { interviewer: interviewerTranscriptWindow, candidate: candidateTranscriptWindow }
   const sessionActiveRef = useRef(false)
   const committedInterviewerRef = useRef<InterviewTurn[]>([])
   const committedCandidateRef = useRef<InterviewTurn[]>([])
   const conversationTurnsRef = useRef<InterviewTurn[]>([])
+  const candidateContextEnabledRef = useRef(candidateContextEnabled)
+  const interviewerDisplayCorrectionRef = useRef<InterviewerDisplayCorrectionCoordinator | null>(null)
+  if (!interviewerDisplayCorrectionRef.current) {
+    interviewerDisplayCorrectionRef.current = createInterviewerDisplayCorrectionCoordinator({
+      correct: async (text) => window.electronAPI?.correctTranscriptText?.(text)
+        ?? { status: 'original', text },
+      cancelRemote: () => window.electronAPI?.cancelTranscriptTextCorrection?.(),
+      onDisplayChanged: () => {
+        const coordinator = interviewerDisplayCorrectionRef.current
+        if (!coordinator) return
+        setInterviewerTranscriptWindow(buildTranscriptDisplayWindow(
+          coordinator.apply(committedInterviewerRef.current),
+        ))
+      },
+    })
+  }
+  // Per-stream extractors for the 【问题修正】…【/问题修正】 section the model
+  // emits at the start of an answer. Keyed by a stable stream identity, since
+  // meta.streamId may be absent while generation ids are always unique.
+  const questionCorrectionExtractorsRef = useRef(new Map<string, CorrectionExtractor>())
+  function extractorForStream(key: string, question: string): CorrectionExtractor {
+    const existing = questionCorrectionExtractorsRef.current.get(key)
+    if (existing) return existing
+    const extractor = createQuestionCorrectionExtractor(question)
+    questionCorrectionExtractorsRef.current.set(key, extractor)
+    return extractor
+  }
+  function clearAnswerExtractor(active: Pick<ActiveAnswer, 'id' | 'attemptId'>): void {
+    questionCorrectionExtractorsRef.current.delete(answerExtractorKey(active.id, active.attemptId))
+  }
+  function clearCandidateExtractor(generationId: number): void {
+    questionCorrectionExtractorsRef.current.delete(`candidate:${generationId}`)
+  }
+  function applyExternalCorrection(question: string, corrected: string) {
+    interviewerDisplayCorrectionRef.current?.putExternalByText(question, corrected)
+  }
+  const candidateCleanupRef = useRef<CandidateSpeechCleanupCoordinator | null>(null)
+  if (!candidateCleanupRef.current) {
+    candidateCleanupRef.current = createCandidateSpeechCleanupCoordinator({
+      cleanup: async (text) => window.electronAPI?.cleanupCandidateSpeech?.(text)
+        ?? { status: 'original', text },
+      cancelRemote: () => window.electronAPI?.cancelCandidateSpeechCleanup?.(),
+      onStatus: setCandidateCleanupStatus,
+    })
+  }
+  const answerPreparationVersionRef = useRef(0)
   const answerSequenceRef = useRef(0)
   // Phase 18 Step 5: the pure coordinator owns round/attempt identity. Answer ids
   // still come from answerSequenceRef so history/telemetry numbering is unchanged.
@@ -177,6 +242,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
   function handleProviderTimeout(answerId: number): void {
     const active = activeAnswerRef.current
     if (!active || active.id !== answerId || active.generation !== sessionGenerationRef.current || active.settled) return
+    clearAnswerExtractor(active)
     active.settled = true
     const timeoutMessage = '模型响应超时，已使用本地兜底稿'
     const trace = traceForAnswer(active.id)
@@ -222,14 +288,28 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
       lastSeenStreamIdRef.current = Math.max(lastSeenStreamIdRef.current, active.streamId)
     }
     void window.electronAPI?.cancelChatStream?.()
+    clearAnswerExtractor(active)
+    dispatchAnswer({ type: 'interrupted', id: active.id })
     recordRoundEvent({ type: 'answer-lifecycle', stage: 'cancel', answerId: active.id, streamId: active.streamId, reason: 'round-restart' })
     activeAnswerRef.current = null
   }
 
-  function startRoundGeneration(action: { type: 'generate'; roundId: number; answerId: number; attemptId: number; question: string; reason: 'provisional' | 'restart' }): void {
+  async function startRoundGeneration(action: { type: 'generate'; roundId: number; answerId: number; attemptId: number; question: string; reason: 'provisional' | 'restart' }): Promise<void> {
+    const preparationVersion = ++answerPreparationVersionRef.current
+    const generation = sessionGenerationRef.current
     cancelCandidateStream()
     const question = toSimplifiedChinese(action.question)
-    const conversationContext = getConversationContext()
+    const contextTurns = await candidateCleanupRef.current!.buildContextTurns(
+      conversationTurnsRef.current,
+      candidateContextEnabledRef.current,
+      300,
+    )
+    if (preparationVersion !== answerPreparationVersionRef.current
+      || generation !== sessionGenerationRef.current
+      || !sessionActiveRef.current) return
+    const conversationContext = buildRecentInterviewContext(contextTurns, {
+      includeCandidateSpeech: candidateContextEnabledRef.current,
+    })
     const job: AnswerJob = {
       id: action.answerId,
       question,
@@ -279,7 +359,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
         cancelSupersededAttempt(action)
         continue
       }
-      startRoundGeneration(action)
+      void startRoundGeneration(action)
     }
   }
 
@@ -320,10 +400,20 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
 
   function getConversationContext(): string {
     try {
-      return buildRecentInterviewContext(conversationTurnsRef.current)
+      return buildRecentInterviewContext(conversationTurnsRef.current, {
+        includeCandidateSpeech: candidateContextEnabledRef.current,
+      })
     } catch {
       return ''
     }
+  }
+
+  function handleCandidateContextChange(enabled: boolean): void {
+    candidateContextEnabledRef.current = enabled
+    setCandidateContextEnabled(enabled)
+    saveCandidateContextEnabled(enabled)
+    if (enabled) candidateCleanupRef.current?.observe(conversationTurnsRef.current, true)
+    else candidateCleanupRef.current?.cancel()
   }
 
   async function startCandidateStream(question: string, prewarmed: { retrieval: { success: boolean; context?: string }; context: string; prompt?: string }, segmentId?: number): Promise<void> {
@@ -332,8 +422,9 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
     const answeredBoundary = lastAnsweredQuestionRef.current
     if (typeof segmentId === 'number' && typeof answeredBoundary?.segmentId === 'number' && segmentId <= answeredBoundary.segmentId) return
     const previous = candidateStreamRef.current
-    if (previous && !previous.settled) {
-      candidateControllerRef.current.cancel(previous.generationId)
+    if (previous) {
+      if (!previous.settled) candidateControllerRef.current.cancel(previous.generationId)
+      clearCandidateExtractor(previous.generationId)
       candidateStreamRef.current = null
     }
     const generationId = ++candidateGenerationRef.current
@@ -344,13 +435,19 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
       await api.streamGeminiChat(prewarmed.prompt, undefined, prewarmed.context, { skipSystemPrompt: true, ignoreKnowledgeMode: true })
       const candidate = candidateStreamRef.current
       if (candidate?.generationId === generationId && !candidate.settled) {
+        const extractor = questionCorrectionExtractorsRef.current.get(`candidate:${generationId}`)
+        flushResolvedCorrectionExtractor(extractor, (leftover) => {
+          candidateControllerRef.current.acceptCandidateToken({ generationId, token: leftover })
+        })
         candidate.settled = true
+        clearCandidateExtractor(generationId)
         candidateControllerRef.current.complete(generationId)
         setCandidateText(candidateControllerRef.current.snapshot().candidateText)
       }
     } catch {
       const candidate = candidateStreamRef.current
       if (candidate?.generationId === generationId) {
+        clearCandidateExtractor(generationId)
         candidateControllerRef.current.cancel(generationId)
         candidateStreamRef.current = null
         setCandidateText('')
@@ -366,6 +463,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
       }
       candidateControllerRef.current.cancel(candidate.generationId)
     }
+    if (candidate) clearCandidateExtractor(candidate.generationId)
     candidateStreamRef.current = null
     setCandidateText('')
   }
@@ -409,6 +507,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
     const api = window.electronAPI
     if (!api?.streamGeminiChat) {
       active.settled = true
+      clearAnswerExtractor(active)
       dispatchAnswer({ type: 'error', id: job.id, error: '回答服务不可用' })
       activeAnswerRef.current = null
       return
@@ -446,7 +545,12 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
       // if a compatible provider resolves without sending a terminal event.
       if (isCurrentAnswer(active) && !active.settled) {
         providerDeadlineControllerRef.current.complete(job.id, 'done')
+        const extractor = questionCorrectionExtractorsRef.current.get(answerExtractorKey(active.id, active.attemptId))
+        flushResolvedCorrectionExtractor(extractor, (leftover) => {
+          dispatchAnswer({ type: 'token', id: active.id, token: leftover })
+        })
         active.settled = true
+        clearAnswerExtractor(active)
         dispatchAnswer({ type: 'done', id: job.id })
         completeLatencyTrace(job.id, 'success')
         setStatus('answered')
@@ -455,6 +559,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
       if (!isCurrentAnswer(active)) return
       providerDeadlineControllerRef.current.complete(job.id, 'error')
       active.settled = true
+      clearAnswerExtractor(active)
       const message = caught?.message || '回答生成失败'
       dispatchAnswer({ type: 'error', id: job.id, error: message })
       completeLatencyTrace(job.id, message === 'Injected Provider timeout' ? 'timeout' : 'error', message)
@@ -462,6 +567,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
       setStatus('ready')
     } finally {
       if (activeAnswerRef.current !== active) return
+      clearAnswerExtractor(active)
       activeAnswerRef.current = null
       if (!active.settled && active.generation === sessionGenerationRef.current && sessionActiveRef.current) {
         dispatchAnswer({ type: 'interrupted', id: job.id })
@@ -495,6 +601,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
         if (roundTickRef.current !== null) window.clearTimeout(roundTickRef.current)
         roundTickRef.current = null
         applyRoundActions(roundCoordinatorRef.current.resetTranscript().actions)
+        interviewerDisplayCorrectionRef.current?.clear()
         lastSettledQuestionRef.current = ''
         return
       }
@@ -519,8 +626,9 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
           // update either the visible transcript or answer context.
           if (nextConversation === previousConversation) return
           conversationTurnsRef.current = nextConversation
+          candidateCleanupRef.current?.observe(nextConversation, candidateContextEnabledRef.current)
           committedCandidateRef.current = appendFinalTurn(committedCandidateRef.current, incoming)
-          setCandidateTranscript(joinTranscriptTurns(committedCandidateRef.current))
+          setCandidateTranscriptWindow(buildTranscriptDisplayWindow(committedCandidateRef.current))
           // Raw candidate state is preserved first; only then may the accepted
           // candidate final close the open question round.
           applyRoundActions(roundCoordinatorRef.current.acceptCandidateFinal({
@@ -534,7 +642,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
             ...(typeof event.audioEndMs === 'number' ? { audioEndMs: event.audioEndMs } : {}),
           }).actions)
         } else {
-          setCandidateTranscript(appendTranscriptSegment(joinTranscriptTurns(committedCandidateRef.current), text))
+          setCandidateTranscriptWindow(buildTranscriptDisplayWindow(committedCandidateRef.current, text))
         }
         setStatus('transcribing')
         return
@@ -543,7 +651,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
       const text = toSimplifiedChinese(rawText)
       if (event.final) {
         if (typeof event.segmentId === 'number') partialPrewarmRef.current.cancelSegment(event.segmentId)
-        const incoming: Partial<InterviewTurn> = {
+        const incoming: InterviewTurn = {
           speaker: event.speaker,
           text,
           final: true,
@@ -615,7 +723,11 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
           }
         }
 
-        setInterviewerTranscript(joinTranscriptTurns(committedInterviewerRef.current))
+        setInterviewerTranscriptWindow(buildTranscriptDisplayWindow(
+          interviewerDisplayCorrectionRef.current?.apply(committedInterviewerRef.current)
+            ?? committedInterviewerRef.current,
+        ))
+        void interviewerDisplayCorrectionRef.current?.request(incoming)
         setStatus('transcribing')
       } else {
         partialPrewarmRef.current.observe({
@@ -623,7 +735,11 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
           segmentId: event.segmentId,
           text,
         })
-        setInterviewerTranscript(appendTranscriptSegment(joinTranscriptTurns(committedInterviewerRef.current), text))
+        setInterviewerTranscriptWindow(buildTranscriptDisplayWindow(
+          interviewerDisplayCorrectionRef.current?.apply(committedInterviewerRef.current)
+            ?? committedInterviewerRef.current,
+          text,
+        ))
         setStatus('transcribing')
       }
     })
@@ -638,7 +754,10 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
       if (!active) {
         const candidate = claimCandidateStream(meta?.streamId)
         if (!candidate) return
-        if (candidateControllerRef.current.acceptCandidateToken({ generationId: candidate.generationId, token })) {
+        const extractor = extractorForStream(`candidate:${candidate.generationId}`, candidate.question)
+        const extraction = extractor.feed(token)
+        if (extraction.corrected) applyExternalCorrection(candidate.question, extraction.corrected)
+        if (extraction.display && candidateControllerRef.current.acceptCandidateToken({ generationId: candidate.generationId, token: extraction.display })) {
           setCandidateText(candidateControllerRef.current.snapshot().candidateText)
         }
         return
@@ -660,8 +779,11 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
         latencyTrace.setProvider({ ttftMs: typeof retrievalReadyAt === 'number' ? firstTokenAt - retrievalReadyAt : undefined })
       }
       latencyTokenCountByAnswerIdRef.current.set(active.id, (latencyTokenCountByAnswerIdRef.current.get(active.id) || 0) + 1)
-      dispatchAnswer({ type: 'token', id: active.id, token })
-      recordRoundEvent({ type: 'answer-lifecycle', stage: 'token', answerId: active.id, streamId: active.streamId, textLength: token.length })
+      const streamKey = `answer:${active.id}:${active.attemptId}`
+      const extraction = extractorForStream(streamKey, active.question).feed(token)
+      if (extraction.corrected) applyExternalCorrection(active.question, extraction.corrected)
+      if (extraction.display) dispatchAnswer({ type: 'token', id: active.id, token: extraction.display })
+      recordRoundEvent({ type: 'answer-lifecycle', stage: 'token', answerId: active.id, streamId: active.streamId, textLength: extraction.display.length })
       setStatus('transcribing')
     })
     const removeDone = api.onGeminiStreamDone?.((data) => {
@@ -670,8 +792,19 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
         const candidate = claimCandidateStream(data?.streamId)
         if (!candidate) return
         if (typeof data?.streamId === 'number') lastSeenStreamIdRef.current = Math.max(lastSeenStreamIdRef.current, data.streamId)
+        const streamKey = `candidate:${candidate.generationId}`
+        const extractor = questionCorrectionExtractorsRef.current.get(streamKey)
+        let finalText = data?.finalText ?? ''
+        let correctionInput = finalText
+        if (extractor) {
+          correctionInput = extractor.finish() + finalText
+        }
+        clearCandidateExtractor(candidate.generationId)
+        const stripped = stripCorrectionSection(correctionInput, candidate.question)
+        if (stripped.corrected) applyExternalCorrection(candidate.question, stripped.corrected)
+        finalText = stripped.text
         candidate.settled = true
-        candidateControllerRef.current.complete(candidate.generationId, data?.finalText)
+        candidateControllerRef.current.complete(candidate.generationId, finalText)
         setCandidateText(candidateControllerRef.current.snapshot().candidateText)
         return
       }
@@ -708,13 +841,25 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
         setError(message)
         setStatus('ready')
         activeAnswerRef.current = null
+        clearAnswerExtractor(active)
         void pumpAnswerQueue()
         return
       }
       providerDeadlineControllerRef.current.complete(active.id, 'done')
       if (typeof data?.streamId === 'number') lastSeenStreamIdRef.current = Math.max(lastSeenStreamIdRef.current, data.streamId)
+      const streamKey = answerExtractorKey(active.id, active.attemptId)
+      const extractor = questionCorrectionExtractorsRef.current.get(streamKey)
+      let finalText = data?.finalText ?? ''
+      let correctionInput = finalText
+      if (extractor) {
+        correctionInput = extractor.finish() + finalText
+      }
+      clearAnswerExtractor(active)
+      const stripped = stripCorrectionSection(correctionInput, active.question)
+      if (stripped.corrected) applyExternalCorrection(active.question, stripped.corrected)
+      finalText = stripped.text
       active.settled = true
-      dispatchAnswer({ type: 'done', id: active.id, finalText: data?.finalText })
+      dispatchAnswer({ type: 'done', id: active.id, finalText })
       recordRoundEvent({ type: 'answer-lifecycle', stage: 'done', answerId: active.id, streamId: active.streamId, textLength: data?.finalText?.length })
       completeLatencyTrace(active.id, 'success')
       setStatus('answered')
@@ -728,6 +873,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
         const candidate = claimCandidateStream(streamId)
         if (!candidate) return
         if (streamId !== undefined) lastSeenStreamIdRef.current = Math.max(lastSeenStreamIdRef.current, streamId)
+        clearCandidateExtractor(candidate.generationId)
         candidateControllerRef.current.cancel(candidate.generationId)
         candidateStreamRef.current = null
         setCandidateText('')
@@ -743,6 +889,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
       providerDeadlineControllerRef.current.complete(active.id, 'error')
       if (streamId !== undefined) lastSeenStreamIdRef.current = Math.max(lastSeenStreamIdRef.current, streamId)
       active.settled = true
+      clearAnswerExtractor(active)
       dispatchAnswer({ type: 'error', id: active.id, error: message })
       recordRoundEvent({ type: 'answer-lifecycle', stage: 'error', answerId: active.id, streamId: active.streamId, reason: /timeout/i.test(message) ? 'provider-timeout' : 'provider-error' })
       completeLatencyTrace(active.id, /timeout/i.test(message) ? 'timeout' : 'error', message)
@@ -758,7 +905,9 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
   }, [])
 
   function invalidateAnswerJobs() {
+    answerPreparationVersionRef.current += 1
     providerDeadlineControllerRef.current.clear()
+    questionCorrectionExtractorsRef.current.clear()
     sessionGenerationRef.current += 1
     answerPrewarmRef.current.clear()
     const queuedJobs = answerQueueRef.current
@@ -790,6 +939,8 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
     committedInterviewerRef.current = []
     committedCandidateRef.current = []
     conversationTurnsRef.current = []
+    interviewerDisplayCorrectionRef.current?.clear()
+    candidateCleanupRef.current?.clear()
     lastAnsweredQuestionRef.current = null
     lastSettledQuestionRef.current = ''
     pendingLatencyTraceRef.current = null
@@ -800,7 +951,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
     ;(window as InterviewLatencyWindow).__nativelyInterviewTranscriptEvents = []
     resetRoundEvents()
     dispatchAnswer({ type: 'reset' })
-    setStatus('ready'); setElapsed(0); setInterviewerTranscript(''); setCandidateTranscript(''); setConfirmedQuestion(''); setError(''); setShowDemo(false); setCandidateText('')
+    setStatus('ready'); setElapsed(0); setInterviewerTranscriptWindow({ text: '', folded: false }); setCandidateTranscriptWindow({ text: '', folded: false }); setConfirmedQuestion(''); setError(''); setShowDemo(false); setCandidateText(''); setFollowLatestTranscript(true)
   }
   async function resetSession() {
     const wasActive = sessionActiveRef.current
@@ -821,13 +972,135 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
     if (window.electronAPI?.startMeeting) { const result = await window.electronAPI.startMeeting({ title: 'AI应用系统工程师面试练习', source, stayOnLauncher: true }); if (!result.success) { sessionActiveRef.current = false; setSessionActive(false); setError(result.error || '无法启动音频会话'); return } }
     setStatus(nextStatusAfterStart())
   }
-  async function stopSession() { sessionActiveRef.current = false; cancelPendingQuestion(); cancelCandidateStream(); invalidateAnswerJobs(); setSessionActive(false); setStatus('ready'); if (window.electronAPI?.endMeeting) await window.electronAPI.endMeeting() }
-  function loadDemo() { setShowDemo(true); setStatus('transcribing'); setInterviewerTranscript(DEMO_TRANSCRIPT[0].text); window.setTimeout(() => { setInterviewerTranscript(DEMO_TRANSCRIPT[1].text); setConfirmedQuestion(DEMO_QUESTION); setStatus('answered') }, 650) }
+  async function stopSession() { sessionActiveRef.current = false; cancelPendingQuestion(); cancelCandidateStream(); interviewerDisplayCorrectionRef.current?.cancel(); candidateCleanupRef.current?.cancel(); invalidateAnswerJobs(); setSessionActive(false); setStatus('ready'); if (window.electronAPI?.endMeeting) await window.electronAPI.endMeeting() }
+  function loadDemo() { setShowDemo(true); setStatus('transcribing'); setInterviewerTranscriptWindow(buildTranscriptDisplayWindow([{ text: DEMO_TRANSCRIPT[0].text }])); window.setTimeout(() => { setInterviewerTranscriptWindow(buildTranscriptDisplayWindow([{ text: DEMO_TRANSCRIPT[1].text }])); setConfirmedQuestion(DEMO_QUESTION); setStatus('answered') }, 650) }
 
-  return <main className="interview-console">
-    <header className="console-topbar drag-region select-none"><div className="brand-lockup"><div className="brand-orbit"><Sparkles size={16} /></div><div><p className="eyebrow">NATIVELY / INTERVIEW LAB</p><h1>面试控制台</h1></div></div><div className="session-meta"><span className={`status-dot status-${status}`} /><span>{STATUS_COPY[status]}</span><span className="meta-divider" /><Timer size={15} /><strong>{formatTime(elapsed)}</strong></div><div className="topbar-actions no-drag"><button className="icon-button" aria-label="打开设置" title="打开设置" onClick={() => onOpenSettings('audio')}><Settings size={17} /></button><button className="icon-button" aria-label="重置会话" onClick={() => { void resetSession() }}><RotateCcw size={17} /></button><WindowControls /></div></header>
-    <section className="console-grid"><aside className="control-rail"><div className="panel-heading"><span>01</span><h2>会话控制</h2></div><div className="control-stack"><label className="field-label">音频源</label><div className="segmented-control"><button className={source === 'microphone' ? 'selected' : ''} onClick={() => setSource('microphone')}><Mic size={15} /> 麦克风</button><button className={source === 'system' ? 'selected' : ''} onClick={() => setSource('system')}><Headphones size={15} /> 系统回采</button></div><label className="field-label" htmlFor="device">设备</label><div className="select-wrap"><select id="device" value={device} onChange={(event) => setDevice(event.target.value)}><option>扬声器 (Realtek High Definition Audio)</option><option>耳机 (AirPods Max)</option></select><ChevronDown size={15} /></div><label className="field-label" htmlFor="chunk">音频块</label><div className="select-wrap"><select id="chunk" value={chunkDuration} onChange={(event) => setChunkDuration(event.target.value)}><option>0.5 秒</option><option>1 秒</option><option>2 秒</option></select><ChevronDown size={15} /></div></div><div className="rail-divider" /><div className="signal-card"><div className="signal-header"><span>输入信号</span><span className={isLive ? 'signal-live' : ''}>{isLive ? 'LIVE' : 'IDLE'}</span></div><div className="mini-wave">{waveform.slice(0, 18).map((height, index) => <i key={index} style={{ height: `${isLive ? height : 8}px` }} />)}</div><p>{isLive ? '正在监听音频并转写' : '开始后显示实时音频活动'}</p></div><div className="rail-actions">{isLive ? <button className="stop-button" onClick={stopSession}><CircleStop size={17} /> 停止采集</button> : <button className="primary-button" onClick={startSession}><Play size={17} fill="currentColor" /> 开始面试</button>}{demoEnabled && <button className="demo-button" onClick={loadDemo}>加载演示问题</button>}</div>{error && <p className="rail-error">{error}</p>}<p className="rail-note">Electron 使用原生音频会话；浏览器模式只用于界面预览。</p></aside>
-      <section className="transcript-panel"><div className="panel-heading"><span>02</span><h2>实时转写</h2><span className="panel-kicker">{isLive ? 'LISTENING' : 'LOCAL BUFFER'}</span></div><div className="waveform large-wave">{waveform.map((height, index) => <i key={index} style={{ height: `${isLive ? height : (index % 4 === 0 ? 22 : 8)}px` }} />)}</div><div className="transcript-stage"><section className="interviewer-transcript" aria-live="polite"><div className="transcript-channel-label"><Radio size={13} />面试官问题</div><div className="live-caption"><span className="caption-marker" />{interviewerTranscript || '等待面试官提问…'}</div>{confirmedQuestion ? <div className="confirmed-question"><div className="confirmed-label"><Radio size={13} /> 已确认问题</div><p>{confirmedQuestion}</p></div> : !interviewerTranscript && <div className="transcript-empty"><Activity size={20} /><p>音频进入后，问题会在这里逐字出现。</p><span>检测到停顿后自动确认问题并生成回答。</span></div>}</section><section className="candidate-transcript" aria-live="polite"><div className="transcript-channel-label"><Mic size={13} />我的回答</div><p>{candidateTranscript || '等待你的回答…'}</p></section></div><div className="transcript-footer"><span><span className="tiny-led" />中文 / Whisper</span><span>{showDemo ? '演示数据已加载' : '原生音频通道'}</span></div></section>
+  function changeInterviewFontSize(channel: keyof InterviewFontSizes, direction: -1 | 1) {
+    setFontSizes((current) => ({ ...current, [channel]: adjustInterviewFontSize(current[channel], direction) }))
+  }
+
+  function resetInterviewFontSize(channel: keyof InterviewFontSizes) {
+    setFontSizes((current) => ({ ...current, [channel]: INTERVIEW_FONT_DEFAULTS[channel] }))
+  }
+
+  function handleFontResetKeyDown(event: ReactKeyboardEvent<HTMLElement>, channel: keyof InterviewFontSizes) {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    event.preventDefault()
+    resetInterviewFontSize(channel)
+  }
+
+  function scrollTranscriptToLatest() {
+    setFollowLatestTranscript(true)
+    window.requestAnimationFrame(() => {
+      const region = transcriptScrollRef.current
+      if (region) region.scrollTop = region.scrollHeight
+    })
+  }
+
+  function handleTranscriptScroll(event: ReactUIEvent<HTMLDivElement>) {
+    setFollowLatestTranscript(isNearTranscriptBottom(event.currentTarget))
+  }
+
+  useEffect(() => { saveInterviewFontSizes(fontSizes) }, [fontSizes])
+
+  useEffect(() => {
+    if (!isLive) return
+    const publishHealthSnapshot = () => {
+      const target = window as InterviewLatencyWindow
+      const performanceMemory = performance as PerformanceWithMemory
+      const display = transcriptDisplayRef.current
+      const snapshot = buildLongSessionHealthSnapshot({
+        sessionDurationSec: meetingStartedAtRef.current > 0 ? (Date.now() - meetingStartedAtRef.current) / 1000 : 0,
+        interviewerTurnCount: committedInterviewerRef.current.length,
+        candidateTurnCount: committedCandidateRef.current.length,
+        visibleChars: display.interviewer.text.length + display.candidate.text.length,
+        folded: display.interviewer.folded || display.candidate.folded,
+        rendererHeapBytes: performanceMemory.memory?.usedJSHeapSize,
+        latencyRecords: target.__nativelyInterviewLatencyRecords,
+      })
+      target.__nativelyInterviewHealthSnapshots = [
+        ...(target.__nativelyInterviewHealthSnapshots || []),
+        snapshot,
+      ].slice(-240)
+    }
+    publishHealthSnapshot()
+    const timer = window.setInterval(publishHealthSnapshot, LONG_SESSION_HEALTH_INTERVAL_MS)
+    return () => window.clearInterval(timer)
+  }, [isLive])
+
+  useEffect(() => {
+    const handle = consoleDragHandleRef.current
+    if (!handle || !window.electronAPI?.sendLauncherWindowDrag) return
+
+    let dragging = false
+    let startX = 0
+    let startY = 0
+    let pending: { dx: number; dy: number } | null = null
+    let frame = 0
+
+    const flush = () => {
+      frame = 0
+      const next = pending
+      pending = null
+      if (!next) return
+      window.electronAPI?.sendLauncherWindowDrag?.({ ...next, phase: 'move' }).catch(() => {})
+    }
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) return
+      dragging = true
+      startX = event.screenX
+      startY = event.screenY
+      try { handle.setPointerCapture(event.pointerId) } catch { /* capture is optional */ }
+      window.electronAPI?.sendLauncherWindowDrag?.({ phase: 'start' }).catch(() => {})
+    }
+    const onPointerMove = (event: PointerEvent) => {
+      if (!dragging) return
+      pending = { dx: event.screenX - startX, dy: event.screenY - startY }
+      if (!frame) frame = requestAnimationFrame(flush)
+    }
+    const onPointerEnd = (event: PointerEvent) => {
+      if (!dragging) return
+      dragging = false
+      try { handle.releasePointerCapture(event.pointerId) } catch { /* already released */ }
+      if (frame) {
+        cancelAnimationFrame(frame)
+        frame = 0
+      }
+      flush()
+      window.electronAPI?.sendLauncherWindowDrag?.({ phase: 'end' }).catch(() => {})
+    }
+
+    handle.addEventListener('pointerdown', onPointerDown)
+    handle.addEventListener('pointermove', onPointerMove)
+    handle.addEventListener('pointerup', onPointerEnd)
+    handle.addEventListener('pointercancel', onPointerEnd)
+    return () => {
+      handle.removeEventListener('pointerdown', onPointerDown)
+      handle.removeEventListener('pointermove', onPointerMove)
+      handle.removeEventListener('pointerup', onPointerEnd)
+      handle.removeEventListener('pointercancel', onPointerEnd)
+      if (frame) cancelAnimationFrame(frame)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!followLatestTranscript) return
+    const frame = window.requestAnimationFrame(() => {
+      const region = transcriptScrollRef.current
+      if (region) region.scrollTop = region.scrollHeight
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [interviewerTranscriptWindow.text, candidateTranscriptWindow.text, confirmedQuestion, fontSizes, followLatestTranscript])
+
+  const consoleStyle = {
+    '--interview-question-font-size': `${fontSizes.question}px`,
+    '--interview-answer-font-size': `${fontSizes.answer}px`,
+  } as CSSProperties
+
+  return <main className="interview-console" style={consoleStyle}>
+    <header className="console-topbar drag-region select-none"><div className="brand-lockup"><div className="brand-orbit"><Sparkles size={16} /></div><div><p className="eyebrow">NATIVELY / INTERVIEW LAB</p><h1>面试控制台</h1></div></div><div ref={consoleDragHandleRef} className="console-drag-handle" aria-hidden="true" /><div className="session-meta"><span className={`status-dot status-${status}`} /><span>{STATUS_COPY[status]}</span><span className="meta-divider" /><Timer size={15} /><strong>{formatTime(elapsed)}</strong></div><div className="topbar-actions no-drag"><div className="font-size-controls no-drag"><div className="font-size-control"><button type="button" aria-label="缩小问题字体" title="缩小问题字体" disabled={fontSizes.question <= INTERVIEW_FONT_MIN} onClick={() => changeInterviewFontSize('question', -1)}>−</button><span role="button" tabIndex={0} title="双击恢复问题默认字号" onDoubleClick={() => resetInterviewFontSize('question')} onKeyDown={(event) => handleFontResetKeyDown(event, 'question')}>问题 {fontSizes.question}px</span><button type="button" aria-label="放大问题字体" title="放大问题字体" disabled={fontSizes.question >= INTERVIEW_FONT_MAX} onClick={() => changeInterviewFontSize('question', 1)}>+</button></div><div className="font-size-control"><button type="button" aria-label="缩小答案字体" title="缩小答案字体" disabled={fontSizes.answer <= INTERVIEW_FONT_MIN} onClick={() => changeInterviewFontSize('answer', -1)}>−</button><span role="button" tabIndex={0} title="双击恢复答案默认字号" onDoubleClick={() => resetInterviewFontSize('answer')} onKeyDown={(event) => handleFontResetKeyDown(event, 'answer')}>答案 {fontSizes.answer}px</span><button type="button" aria-label="放大答案字体" title="放大答案字体" disabled={fontSizes.answer >= INTERVIEW_FONT_MAX} onClick={() => changeInterviewFontSize('answer', 1)}>+</button></div></div><button className="icon-button" aria-label="打开设置" title="打开设置" onClick={() => onOpenSettings('audio')}><Settings size={17} /></button><button className="icon-button" aria-label="重置会话" onClick={() => { void resetSession() }}><RotateCcw size={17} /></button><WindowControls /></div></header>
+    <section className="console-grid"><aside className="control-rail"><div className="panel-heading"><span>01</span><h2>会话控制</h2></div><div className="control-stack"><label className="field-label">音频源</label><div className="segmented-control"><button className={source === 'microphone' ? 'selected' : ''} onClick={() => setSource('microphone')}><Mic size={15} /> 麦克风</button><button className={source === 'system' ? 'selected' : ''} onClick={() => setSource('system')}><Headphones size={15} /> 系统回采</button></div><label className="field-label" htmlFor="device">设备</label><div className="select-wrap"><select id="device" value={device} onChange={(event) => setDevice(event.target.value)}><option>扬声器 (Realtek High Definition Audio)</option><option>耳机 (AirPods Max)</option></select><ChevronDown size={15} /></div><label className="field-label" htmlFor="chunk">音频块</label><div className="select-wrap"><select id="chunk" value={chunkDuration} onChange={(event) => setChunkDuration(event.target.value)}><option>0.5 秒</option><option>1 秒</option><option>2 秒</option></select><ChevronDown size={15} /></div><label className="candidate-context-toggle"><input type="checkbox" checked={candidateContextEnabled} onChange={(event) => handleCandidateContextChange(event.target.checked)} /><span className="candidate-context-switch" aria-hidden="true" /><span><strong>我的发言供 AI 参考</strong><small>开启后发言片段会调用当前 AI 服务整理；关闭后仍会转写和记录</small>{candidateContextEnabled && candidateCleanupStatus !== 'idle' && <em className={`candidate-cleanup-status status-${candidateCleanupStatus}`}>{candidateCleanupStatus === 'cleaning' ? 'AI 整理中' : candidateCleanupStatus === 'cleaned' ? 'AI 已整理' : 'AI 使用原文'}</em>}</span></label></div><div className="rail-divider" /><div className="signal-card"><div className="signal-header"><span>输入信号</span><span className={isLive ? 'signal-live' : ''}>{isLive ? 'LIVE' : 'IDLE'}</span></div><div className="mini-wave">{waveform.slice(0, 18).map((height, index) => <i key={index} style={{ height: `${isLive ? height : 8}px` }} />)}</div><p>{isLive ? '正在监听音频并转写' : '开始后显示实时音频活动'}</p></div><div className="rail-actions">{isLive ? <button className="stop-button" onClick={stopSession}><CircleStop size={17} /> 停止采集</button> : <button className="primary-button" onClick={startSession}><Play size={17} fill="currentColor" /> 开始面试</button>}{demoEnabled && <button className="demo-button" onClick={loadDemo}>加载演示问题</button>}</div>{error && <p className="rail-error">{error}</p>}<p className="rail-note">Electron 使用原生音频会话；浏览器模式只用于界面预览。</p></aside>
+      <section className="transcript-panel"><div className="panel-heading"><span>02</span><h2>实时转写</h2><span className="panel-kicker">{isLive ? 'LISTENING' : 'LOCAL BUFFER'}</span></div><div className="waveform large-wave">{waveform.map((height, index) => <i key={index} style={{ height: `${isLive ? height : (index % 4 === 0 ? 22 : 8)}px` }} />)}</div><div className="transcript-scroll-shell"><div ref={transcriptScrollRef} className="transcript-scroll-region" onScroll={handleTranscriptScroll}><div className="transcript-stage">{(interviewerTranscriptWindow.folded || candidateTranscriptWindow.folded) && <div className="transcript-folded-notice">已折叠更早转写，完整内容仍用于上下文和会议记录</div>}<section className="interviewer-transcript" aria-live="polite"><div className="transcript-channel-label"><Radio size={13} />面试官问题</div><div className="live-caption"><span className="caption-marker" />{interviewerTranscriptWindow.text || '等待面试官提问…'}</div>{!interviewerTranscriptWindow.text && <div className="transcript-empty"><Activity size={20} /><p>音频进入后，问题会在这里逐字出现。</p><span>检测到停顿后自动确认问题并生成回答。</span></div>}</section><section className="candidate-transcript" aria-live="polite"><div className="transcript-channel-label"><Mic size={13} />我的回答</div><p>{candidateTranscriptWindow.text || '等待你的回答…'}</p></section></div></div>{!followLatestTranscript && <button type="button" className="transcript-return-latest no-drag" aria-label="回到最新转写" onClick={scrollTranscriptToLatest}>回到最新</button>}</div>{confirmedQuestion && <div className="confirmed-question" aria-label="当前已确认问题"><div className="confirmed-label"><Radio size={13} /> 已确认问题</div><p>{confirmedQuestion}</p></div>}<div className="transcript-footer"><span><span className="tiny-led" />中文 / Whisper</span><span>{showDemo ? '演示数据已加载' : '原生音频通道'}</span></div></section>
       <aside className="answer-panel"><div className="panel-heading"><span>03</span><h2>回答建议</h2><span className="answer-badge">AI READY</span></div><AnswerPanel demo={showDemo} question={selectedAnswer?.question || ''} answer={selectedAnswer?.answer || ''} candidateText={candidateText} hits={selectedAnswer?.hits || []} history={answerState.items} selectedId={answerState.selectedId} answerStatus={selectedAnswer?.status || null} onSelectAnswer={(id) => dispatchAnswer({ type: 'select', id })} onLoadDemo={loadDemo} /></aside>
     </section><footer className="console-footer"><span>LOCAL SESSION / NO CREDENTIALS STORED</span><span>Interview Assistant · v0.1</span></footer>
   </main>

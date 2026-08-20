@@ -45,6 +45,7 @@ import type { LocalWhisperSegmenterMode, SpeechSegment, WorkerOutMessage } from 
 import { acquireOnnxSlot, hasEnoughMemoryForOnnxSession, getMinFreeGBForOnnxSession, getOnnxGateSnapshot } from '../utils/onnxThreadConfig';
 import { RECOGNITION_LANGUAGES } from '../config/languages';
 import { SettingsManager } from '../services/SettingsManager';
+import { CapturePcmTimelineMapper } from './capturePcmTimelineMapper';
 
 type Segmenter = {
     push: (samples: Float32Array) => SpeechSegment[];
@@ -114,7 +115,10 @@ export class LocalWhisperSTT extends EventEmitter {
     private segmenterMode: LocalWhisperSegmenterMode = 'baseline';
     private sessionGeneration = 0;
     private sessionAudioMs = 0;
+    private captureTimeline: CapturePcmTimelineMapper | null = null;
+    private segmentAxisBaseMs = 0;
     private segmentSequence = 0;
+    private segmentIdBase = 0;
     private segmenterFallbackLogged = false;
     private isActive = false;
     // Cross-loader ONNX gate slot. Acquired in spawnWorker() before posting
@@ -243,6 +247,10 @@ export class LocalWhisperSTT extends EventEmitter {
         return `[LocalWhisperSTT/${modelName}${channelTag}]`;
     }
 
+    private cleanTranscript(text: string): string {
+        return filterHallucination(text);
+    }
+
     private readSegmenterMode(): LocalWhisperSegmenterMode {
         try {
             return SettingsManager.getInstance().get('localWhisperSegmenter') === 'meetily-experiment'
@@ -266,7 +274,7 @@ export class LocalWhisperSTT extends EventEmitter {
         }
     }
 
-    private handleSegmenterFailure(error: unknown): void {
+    private handleSegmenterFailure(error: unknown, fallbackAxisMs: number): void {
         if (!this.segmenterFallbackLogged) {
             this.segmenterFallbackLogged = true;
             console.warn(`${this.diagnosticLabel()} segmenter failed; falling back to baseline`, {
@@ -274,6 +282,10 @@ export class LocalWhisperSTT extends EventEmitter {
                 error: error instanceof Error ? error.message : String(error),
             });
         }
+        this.segmentAxisBaseMs = fallbackAxisMs;
+        this.segmentIdBase = this.segmentSequence;
+        this.sessionAudioMs = 0;
+        this.trackedSegmentId = 0;
         this.segmenterMode = 'baseline';
         this.vad = new VadProcessor();
     }
@@ -283,7 +295,11 @@ export class LocalWhisperSTT extends EventEmitter {
         try {
             return this.vad.push(samples);
         } catch (error) {
-            this.handleSegmenterFailure(error);
+            const durationMs = (samples.length / 16000) * 1000;
+            const fallbackAxisMs = this.captureTimeline
+                ? Math.max(0, this.captureTimeline.compressedCursorMs - durationMs)
+                : this.segmentAxisBaseMs + this.sessionAudioMs;
+            this.handleSegmenterFailure(error, fallbackAxisMs);
             return this.vad?.push(samples) ?? [];
         }
     }
@@ -293,27 +309,49 @@ export class LocalWhisperSTT extends EventEmitter {
         try {
             return this.vad.flush();
         } catch (error) {
-            this.handleSegmenterFailure(error);
+            const fallbackAxisMs = this.captureTimeline?.compressedCursorMs
+                ?? this.segmentAxisBaseMs + this.sessionAudioMs;
+            this.handleSegmenterFailure(error, fallbackAxisMs);
             return this.vad?.flush() ?? [];
         }
     }
 
     private normalizeSegment(segment: SpeechSegment): FinalSegmentMetadata {
-        const endMs = typeof segment.endMs === 'number' ? segment.endMs : this.sessionAudioMs;
-        const startMs = typeof segment.startMs === 'number'
-            ? segment.startMs
-            : Math.max(0, endMs - segment.durationMs);
-        const sequenceId = typeof segment.sequenceId === 'number'
-            ? segment.sequenceId
+        const compressedEndMs = this.segmentAxisBaseMs
+            + (typeof segment.endMs === 'number' ? segment.endMs : this.sessionAudioMs);
+        const compressedStartMs = this.segmentAxisBaseMs
+            + (typeof segment.startMs === 'number'
+                ? segment.startMs
+                : Math.max(0, this.sessionAudioMs - segment.durationMs));
+        const mapped = this.captureTimeline?.mapRange(compressedStartMs, compressedEndMs)
+            ?? { startMs: compressedStartMs, endMs: compressedEndMs };
+        const providerSequenceId = typeof segment.sequenceId === 'number'
+            ? this.segmentIdBase + segment.sequenceId
+            : undefined;
+        const sequenceId = typeof providerSequenceId === 'number' && providerSequenceId > this.segmentSequence
+            ? providerSequenceId
             : ++this.segmentSequence;
         this.segmentSequence = Math.max(this.segmentSequence, sequenceId);
         return {
             sessionId: this.sessionGeneration,
             sequenceId,
-            startMs,
-            endMs,
+            startMs: mapped.startMs,
+            endMs: mapped.endMs,
             ...(typeof segment.confidence === 'number' ? { confidence: segment.confidence } : {}),
         };
+    }
+
+    beginSession(meetingGeneration: number, originMonotonicMs: number): void {
+        if (
+            this.sessionGeneration === meetingGeneration
+            && this.captureTimeline?.originMonotonicMs === originMonotonicMs
+        ) return;
+        this.sessionGeneration = meetingGeneration;
+        this.captureTimeline = new CapturePcmTimelineMapper({ originMonotonicMs });
+        this.segmentAxisBaseMs = 0;
+        this.sessionAudioMs = 0;
+        this.segmentSequence = 0;
+        this.segmentIdBase = 0;
     }
 
     private dispatchSegment(segment: SpeechSegment): void {
@@ -357,13 +395,17 @@ export class LocalWhisperSTT extends EventEmitter {
             });
             this.pendingAudio = [];
         }
-        const sessionId = ++this.sessionGeneration;
+        if (!this.captureTimeline) {
+            this.beginSession(this.sessionGeneration + 1, performance.now());
+        }
+        const sessionId = this.sessionGeneration;
         this.isDrainingFinals = false;
         this.drainingFinalsInFlight = 0;
         this.clearSpeechEndedFlushTimer();
         this.segmenterMode = this.readSegmenterMode();
+        this.segmentAxisBaseMs = this.captureTimeline?.compressedCursorMs ?? 0;
+        this.segmentIdBase = this.segmentSequence;
         this.sessionAudioMs = 0;
-        this.segmentSequence = 0;
         this.segmenterFallbackLogged = false;
         this.isActive = true;
         this.vad = this.createSegmenter(this.segmenterMode);
@@ -421,7 +463,6 @@ export class LocalWhisperSTT extends EventEmitter {
         this.firstPartialEmittedForSegment = 0;
         this.trackedSegmentId = 0;
         this.sessionAudioMs = 0;
-        this.segmentSequence = 0;
         this.latencyLogCounter = 0;
 
         const w = this.worker;
@@ -436,8 +477,10 @@ export class LocalWhisperSTT extends EventEmitter {
         if (!this.isActive || !this.vad) return;
         this.clearSpeechEndedFlushTimer();
         const f32 = resampleToF32(chunk, this.inputSampleRate);
+        const chunkDurationMs = (f32.length / 16000) * 1000;
+        this.captureTimeline?.appendChunk(chunkDurationMs, performance.now());
         const segs = this.pushSegmentsWithFallback(f32);
-        this.sessionAudioMs += (f32.length / 16000) * 1000;
+        this.sessionAudioMs += chunkDurationMs;
         segs.forEach(s => this.dispatchSegment(s));
 
         // Soft-commit: if a segment has grown past MAX_SEGMENT_MS, force a
@@ -448,6 +491,11 @@ export class LocalWhisperSTT extends EventEmitter {
             const committed = this.vad.softCommit();
             if (committed) this.dispatchSegment(committed);
         }
+
+        this.captureTimeline?.pruneBefore(Math.max(
+            0,
+            this.captureTimeline.compressedCursorMs - 30_000,
+        ));
 
         // Telemetry: re-stamp segmentOpenedAt whenever the open VAD segment
         // is a different one than we last tracked. ID-based detection
@@ -623,7 +671,7 @@ export class LocalWhisperSTT extends EventEmitter {
         this.streamingStallCount = 0;
         this.streamingNextDelayMs = this.streamingIntervalBaseMs;
 
-        const cleaned = filterHallucination(text);
+        const cleaned = this.cleanTranscript(text);
         if (!cleaned) return;
 
         // Streaming-class models (Moonshine) produce stable, deterministic
@@ -642,7 +690,8 @@ export class LocalWhisperSTT extends EventEmitter {
                     text: cleaned.trim(),
                     isFinal: false,
                     confidence: 0.7,
-                    ...(this.trackedSegmentId > 0 ? { segmentId: this.trackedSegmentId } : {}),
+                    sttSessionGeneration: this.sessionGeneration,
+                    ...(this.trackedSegmentId > 0 ? { segmentId: this.segmentIdBase + this.trackedSegmentId } : {}),
                 });
             }
             return;
@@ -665,7 +714,8 @@ export class LocalWhisperSTT extends EventEmitter {
                 text: this.lastEmittedText.trim(),
                 isFinal: false,
                 confidence: 0.7,
-                ...(this.trackedSegmentId > 0 ? { segmentId: this.trackedSegmentId } : {}),
+                sttSessionGeneration: this.sessionGeneration,
+                ...(this.trackedSegmentId > 0 ? { segmentId: this.segmentIdBase + this.trackedSegmentId } : {}),
             });
         }
     }
@@ -941,7 +991,7 @@ export class LocalWhisperSTT extends EventEmitter {
                     ? Math.round(performance.now() - dispatchedAt)
                     : undefined;
                 if (metadata && metadata.sessionId !== this.sessionGeneration) return;
-                const text = filterHallucination(msg.text);
+                const text = this.cleanTranscript(msg.text);
                 if (text) {
                     if (this.segmentOpenedAt > 0) {
                         const dt = performance.now() - this.segmentOpenedAt;
@@ -953,6 +1003,7 @@ export class LocalWhisperSTT extends EventEmitter {
                         text,
                         isFinal: true,
                         confidence: 0.9,
+                        sttSessionGeneration: metadata?.sessionId ?? this.sessionGeneration,
                         ...(metadata ? {
                             segmentId: metadata.sequenceId,
                             audioStartMs: metadata.startMs,

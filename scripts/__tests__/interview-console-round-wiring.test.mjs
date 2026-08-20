@@ -192,6 +192,40 @@ test('token, done and error each validate the full coordinator tuple before muta
   }
 });
 
+test('answer correction extractors are attempt-scoped and fed only after identity acceptance', () => {
+  has(/`answer:\$\{active\.id\}:\$\{active\.attemptId\}`/, 'answer extractor key must include answerId and attemptId');
+  const tokenHandler = consoleSource.slice(consoleSource.indexOf('const removeToken'), consoleSource.indexOf('const removeDone'));
+  const answerTokenHandler = tokenHandler.slice(tokenHandler.indexOf('// Validate the full coordinator identity'));
+  assert.ok(answerTokenHandler.indexOf('acceptProviderEvent') < answerTokenHandler.indexOf('.feed(token)'), 'identity gate must run before the answer extractor.feed');
+  has(/questionCorrectionExtractorsRef\.current\.delete\(answerExtractorKey\(active\.id, active\.attemptId\)\)/, 'terminal cleanup must target the exact attempt extractor');
+});
+
+test('every answer terminal path clears only the accepted attempt extractor', () => {
+  has(/function clearAnswerExtractor\(active:[^)]*\)[\s\S]{0,180}?delete\(answerExtractorKey\(active\.id, active\.attemptId\)\)/, 'one helper must clear the exact answer attempt');
+  const timeout = consoleSource.slice(consoleSource.indexOf('function handleProviderTimeout'), consoleSource.indexOf('useEffect(() => { if (!isLive)'));
+  assert.ok(timeout.indexOf('if (!active') < timeout.indexOf('clearAnswerExtractor(active)'), 'timeout cleanup must follow its identity guard');
+  const cancel = consoleSource.slice(consoleSource.indexOf('function cancelSupersededAttempt'), consoleSource.indexOf('async function startRoundGeneration'));
+  assert.match(cancel, /clearAnswerExtractor\(active\)/);
+  assert.doesNotMatch(cancel, /flushResolvedCorrectionExtractor/, 'superseded attempts must discard buffered tails');
+  assert.match(cancel, /dispatchAnswer\(\{ type: 'interrupted', id: active\.id \}\)/);
+  const pump = consoleSource.slice(consoleSource.indexOf('async function pumpAnswerQueue'), consoleSource.indexOf('useEffect(() => {\n    const api'));
+  const resolveFallback = pump.slice(pump.indexOf('// Providers normally emit'), pump.indexOf('} catch (caught'));
+  assert.match(resolveFallback, /flushResolvedCorrectionExtractor\(extractor,[\s\S]{0,220}?dispatchAnswer\(\{ type: 'token', id: active\.id, token: leftover \}\)/, 'resolve-without-done must flush held visible text into the accepted attempt');
+  assert.match(resolveFallback, /clearAnswerExtractor\(active\)/, 'resolve-without-done must clear the attempt');
+  const caught = pump.slice(pump.indexOf('} catch (caught'), pump.indexOf('} finally'));
+  assert.match(caught, /clearAnswerExtractor\(active\)/, 'throw path must clear the attempt after identity acceptance');
+  assert.doesNotMatch(caught, /flushResolvedCorrectionExtractor/, 'failed attempts must discard buffered tails');
+  const finallyBody = pump.slice(pump.indexOf('} finally'));
+  assert.match(finallyBody, /if \(activeAnswerRef\.current !== active\) return[\s\S]{0,160}?clearAnswerExtractor\(active\)/, 'interrupted/finally cleanup must follow active identity');
+  has(/questionCorrectionExtractorsRef\.current\.clear\(\)/, 'global reset must clear all extractors');
+});
+
+test('done without streamed tokens always strips the correction marker before replacing the draft', () => {
+  const done = consoleSource.slice(consoleSource.indexOf('const removeDone'), consoleSource.indexOf('const removeAnswerError'));
+  assert.match(done, /if \(extractor\) \{[\s\S]{0,180}?\}[\s\S]{0,120}?clearAnswerExtractor\(active\)[\s\S]{0,120}?const stripped = stripCorrectionSection\([^\n]+active\.question\)/);
+  assert.match(done, /finalText = stripped\.text[\s\S]{0,160}?dispatchAnswer\(\{ type: 'done', id: active\.id, finalText \}\)/);
+});
+
 test('reset and clear invoke the coordinator transcript reset', () => {
   has(
     /resetTranscript\(\)/,

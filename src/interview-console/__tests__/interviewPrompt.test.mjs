@@ -22,3 +22,22 @@ test('empty or invalid candidate context falls back to the current prompt shape'
   assert.match(prompt, /个人资料与题库：\n资料/);
   assert.doesNotMatch(prompt, /我的回答|候选人此前的实际回答/);
 });
+
+test('requires the question-correction section at the start of the answer', () => {
+  const prompt = buildInterviewConsolePrompt('你如何定位线上问题？', '资料', undefined);
+
+  assert.match(prompt, /【问题修正】<修正后的面试官问题>【\/问题修正】/);
+  assert.match(prompt, /只修正问题里明显的语音转写错别字、同音字和断句错误/);
+  assert.match(prompt, /保持原意、技术词、数字不变/);
+  assert.match(prompt, /没有问题可修正时原样输出问题/);
+});
+
+test('owns the spoken length contract without a blanket 30-60 second rule', () => {
+  const prompt = buildInterviewConsolePrompt('什么是 POSIX？', '资料');
+  assert.match(prompt, /简单定义、是非题或单一事实题[^\n]*1[～-]2 句[^\n]*15[～-]35 字/);
+  assert.match(prompt, /普通问题[^\n]*2[～-]3 句[^\n]*25[～-]55 字/);
+  assert.match(prompt, /行为问题[^\n]*60[～-]110 字/);
+  assert.match(prompt, /标点和空白不计/);
+  assert.match(prompt, /代码[^\n]*调试[^\n]*(?:DSA|数据结构)[^\n]*系统设计[^\n]*保持完整/);
+  assert.doesNotMatch(prompt, /30\s*[-～]\s*60\s*秒/);
+});

@@ -1222,16 +1222,31 @@ import { SonioxStreamingSTT } from "./audio/SonioxStreamingSTT"
 import { ElevenLabsStreamingSTT } from "./audio/ElevenLabsStreamingSTT"
 import { OpenAIStreamingSTT } from "./audio/OpenAIStreamingSTT"
 import { NativelyProSTT } from "./audio/NativelyProSTT"
+import {
+  createAlibabaFunAsrProviderPair,
+  type AlibabaFunAsrProviderPair,
+} from "./audio/alibabaFunAsrProviderFactory"
+import { waitForSttDrain } from "./audio/sttDrain"
+import { LocalWhisperSequenceCoordinator } from "./audio/localWhisperSequenceCoordinator"
 import { ThemeManager } from "./ThemeManager"
 import { RAGManager } from "./rag/RAGManager"
 import { DatabaseManager } from "./db/DatabaseManager"
 import { warmupIntentClassifier } from "./llm"
 
-/** Unified type for all STT providers with optional extended capabilities */
-type STTProvider = (GoogleSTT | RestSTT | DeepgramStreamingSTT | SonioxStreamingSTT | ElevenLabsStreamingSTT | OpenAIStreamingSTT | NativelyProSTT) & {
-  finalize?: () => void;
+/** Structural contract shared by local, cloud, and streaming STT providers. */
+type STTProvider = {
+  on(event: string, listener: (...args: any[]) => void): unknown;
+  removeAllListeners(): unknown;
+  setRecognitionLanguage(language: string): void;
+  setSampleRate(rate: number): void;
+  setCredentials?: (keyFilePath: string) => void;
+  write(chunk: Buffer): void;
+  stop(): void;
+  start?: () => void;
+  finalize?: () => void | Promise<void>;
   setAudioChannelCount?: (count: number) => void;
   notifySpeechEnded?: () => void;
+  beginSession?: (meetingGeneration: number, originMonotonicMs: number) => void;
 };
 
 type ScreenshotWindowMode = 'launcher' | 'overlay';
@@ -1381,6 +1396,9 @@ export class AppState {
   private hasDebugged: boolean = false
   private isMeetingActive: boolean = false; // Guard for session state leaks
   private _meetingGeneration = 0;
+  private _captureOriginMonotonicMs = 0;
+  private _localWhisperSequenceCoordinator = new LocalWhisperSequenceCoordinator();
+  private _localWhisperProviderInstanceEpoch = 0;
   private _audioInitPromise: Promise<void> | null = null;
   // AbortController handle for the in-flight startMeeting() audio init, so endMeeting()
   // can cancel it (signal.aborted short-circuits the init's isCurrentMeeting() guards)
@@ -3065,6 +3083,7 @@ export class AppState {
   private _audioTestStarting = false;               // P2-12: in-flight guard against concurrent calls
   private googleSTT: STTProvider | null = null; // Interviewer
   private googleSTT_User: STTProvider | null = null; // User
+  private alibabaFunAsrPair: AlibabaFunAsrProviderPair | null = null;
 
   private createSTTProvider(speaker: 'interviewer' | 'user'): STTProvider | null {
     const { CredentialsManager } = require('./services/CredentialsManager');
@@ -3198,21 +3217,54 @@ export class AppState {
       const lws = new LocalWhisperSTT(modelId);
       // Channel label disambiguates the two concurrent instances in latency logs.
       lws.setChannel(speaker === 'interviewer' ? 'system' : 'mic');
+      lws.beginSession(this._transcriptSessionId, this._captureOriginMonotonicMs);
       stt = lws as any;
+    } else if (sttProvider === 'alibaba-fun-asr') {
+      if (!this.alibabaFunAsrPair) {
+        this.initializeAlibabaFunAsrProviderPair();
+      }
+      // The pair initializer configures both channels atomically. Returning the
+      // selected instance here avoids registering transcript/error listeners a
+      // second time on prewarm and sleep-resume paths.
+      return this.alibabaFunAsrPair![speaker];
     } else {
       stt = new GoogleSTT(speaker);
     }
 
+    return this.configureSTTProvider(stt, speaker, sttProvider, sttLanguage);
+  }
+
+  private configureSTTProvider(
+    stt: STTProvider,
+    speaker: 'interviewer' | 'user',
+    sttProvider: string,
+    sttLanguage: string,
+  ): STTProvider {
     stt.setRecognitionLanguage(sttLanguage);
+    const localWhisperInstanceEpoch = sttProvider === 'local-whisper'
+      ? ++this._localWhisperProviderInstanceEpoch
+      : null;
 
     // Wire Transcript Events
-    stt.on('transcript', (segment: { text: string, isFinal: boolean, confidence: number, speakerId?: string, segmentId?: number, audioStartMs?: number, audioEndMs?: number, diagnostics?: NativeAudioTranscriptDiagnostics }) => {
+    stt.on('transcript', (segment: { text: string, isFinal: boolean, confidence: number, speakerId?: string, segmentId?: number, audioStartMs?: number, audioEndMs?: number, sttSessionGeneration?: number, diagnostics?: NativeAudioTranscriptDiagnostics }) => {
       // Accept transcripts while a meeting is active OR while we're draining
       // trailing finals after Stop. `_isDraining` covers the ~250 ms grace
       // window between Stop click and STT socket close so the user's last
       // sentence isn't silently dropped.
       if (!this.isMeetingActive && !this._isDraining) {
         return;
+      }
+      let resolvedSegmentId = segment.segmentId;
+      if (sttProvider === 'local-whisper') {
+        const allocated = this._localWhisperSequenceCoordinator.resolve(
+          speaker,
+          segment.sttSessionGeneration,
+          localWhisperInstanceEpoch,
+          segment.segmentId,
+          segment.isFinal,
+        );
+        if (allocated === null) return;
+        resolvedSegmentId = allocated;
       }
 
       this.intelligenceManager.handleTranscript({
@@ -3244,7 +3296,7 @@ export class AppState {
         timestamp: Date.now(),
         final: segment.isFinal,
         confidence: segment.confidence,
-        ...(typeof segment.segmentId === 'number' ? { segmentId: segment.segmentId } : {}),
+        ...(typeof resolvedSegmentId === 'number' ? { segmentId: resolvedSegmentId } : {}),
         ...(typeof segment.audioStartMs === 'number' ? { audioStartMs: segment.audioStartMs } : {}),
         ...(typeof segment.audioEndMs === 'number' ? { audioEndMs: segment.audioEndMs } : {}),
         // Phase 18 Step 2 diagnostic-only: additive, optional. Never consumed
@@ -3439,6 +3491,33 @@ export class AppState {
     } as SttStatusPayload);
 
     return stt;
+  }
+
+  private initializeAlibabaFunAsrProviderPair(): void {
+    if (this.alibabaFunAsrPair && this.googleSTT && this.googleSTT_User) return;
+
+    const credentials = CredentialsManager.getInstance();
+    const apiKey = credentials.getAlibabaFunAsrApiKey();
+    if (!apiKey) {
+      throw new Error('Alibaba Fun-ASR API key is required. Configure it in Settings before starting a meeting.');
+    }
+    const publicConfig = SettingsManager.getInstance().getAlibabaFunAsrConfig();
+    const pair = createAlibabaFunAsrProviderPair({ apiKey, ...publicConfig });
+    const sttLanguage = credentials.getSttLanguage();
+
+    try {
+      const interviewer = this.configureSTTProvider(pair.interviewer, 'interviewer', 'alibaba-fun-asr', sttLanguage);
+      const user = this.configureSTTProvider(pair.user, 'user', 'alibaba-fun-asr', sttLanguage);
+      this.alibabaFunAsrPair = pair;
+      this.googleSTT = interviewer;
+      this.googleSTT_User = user;
+    } catch (error) {
+      pair.interviewer.stop();
+      pair.user.stop();
+      pair.interviewer.removeAllListeners();
+      pair.user.removeAllListeners();
+      throw error;
+    }
   }
 
   /**
@@ -3863,6 +3942,30 @@ export class AppState {
       const { CredentialsManager } = require('./services/CredentialsManager');
       const sttProv = CredentialsManager.getInstance().getSttProvider();
 
+      if (sttProv === 'alibaba-fun-asr') {
+        try {
+          this.initializeAlibabaFunAsrProviderPair();
+        } catch (sttErr) {
+          console.error('[Main] Alibaba Fun-ASR pair initialization failed:', sttErr);
+          this.sendAudioCaptureFailed({
+            channel: 'system',
+            message: 'Alibaba Fun-ASR failed to initialize. Check its API key, region, model, and workspace in Settings.',
+            attempt: 0,
+            maxAttempts: 0,
+            terminal: true,
+            stuck: false,
+          });
+          this.sendAudioCaptureFailed({
+            channel: 'mic',
+            message: 'Alibaba Fun-ASR failed to initialize. Check its API key, region, model, and workspace in Settings.',
+            attempt: 0,
+            maxAttempts: 0,
+            terminal: true,
+            stuck: false,
+          });
+          throw sttErr;
+        }
+      } else {
       if (!this.googleSTT) {
         console.log(`[Main] Creating interviewer STT provider: ${sttProv}`);
         try {
@@ -3901,6 +4004,7 @@ export class AppState {
             stuck: false,
           });
         }
+      }
       }
 
       // STT sample rate is now applied lazily on the first chunk arrival
@@ -4022,6 +4126,7 @@ export class AppState {
       try { this.googleSTT_User.stop(); this.googleSTT_User.removeAllListeners(); } catch (e) { console.warn('[Main] Resume: googleSTT_User teardown threw:', e); }
       this.googleSTT_User = null;
     }
+    this.alibabaFunAsrPair = null;
 
     // Mic first. MicrophoneCapture is lazy-init: start() constructs the cpal
     // input stream. Do this before starting the CoreAudio system tap so cpal
@@ -4106,7 +4211,7 @@ export class AppState {
     if (!this.googleSTT) {
       try {
         this.googleSTT = this.createSTTProvider('interviewer');
-        this.googleSTT?.start();
+        this.googleSTT?.start?.();
       } catch (sttErr) {
         console.error('[Main] Resume: interviewer STT recreate failed:', sttErr);
         this.googleSTT = null;
@@ -4115,11 +4220,14 @@ export class AppState {
     if (!this.googleSTT_User) {
       try {
         this.googleSTT_User = this.createSTTProvider('user');
-        this.googleSTT_User?.start();
+        this.googleSTT_User?.start?.();
       } catch (sttErr) {
         console.error('[Main] Resume: user STT recreate failed:', sttErr);
         this.googleSTT_User = null;
       }
+    }
+    if (CredentialsManager.getInstance().getSttProvider() === 'alibaba-fun-asr') {
+      this.alibabaFunAsrPair?.beginSession(this._transcriptSessionId, this._captureOriginMonotonicMs);
     }
   }
 
@@ -4591,8 +4699,8 @@ export class AppState {
       // before starting the CoreAudio system tap to avoid HAL contention.
       this.microphoneCapture?.start();
       this.systemAudioCapture?.start();
-      this.googleSTT?.start();
-      this.googleSTT_User?.start();
+      this.googleSTT?.start?.();
+      this.googleSTT_User?.start?.();
     }
   }
 
@@ -4683,6 +4791,7 @@ export class AppState {
       this.googleSTT_User.removeAllListeners();
       this.googleSTT_User = null;
     }
+    this.alibabaFunAsrPair = null;
 
     // Only reinitialize the pipeline when a meeting is already active.
     // Outside a meeting, defer pipeline creation to startMeeting() so we never
@@ -4690,12 +4799,15 @@ export class AppState {
     // macOS and immediately triggers the orange mic indicator even without .play()).
     if (this.isMeetingActive) {
       await this.setupSystemAudioPipeline();
+      if (CredentialsManager.getInstance().getSttProvider() === 'alibaba-fun-asr') {
+        this.alibabaFunAsrPair?.beginSession(this._transcriptSessionId, this._captureOriginMonotonicMs);
+      }
       // Mic first: lazy mic start constructs the cpal input stream; do it
       // before starting the CoreAudio system tap to avoid HAL contention.
       this.microphoneCapture?.start();
       this.systemAudioCapture?.start();
-      this.googleSTT?.start();
-      this.googleSTT_User?.start();
+      this.googleSTT?.start?.();
+      this.googleSTT_User?.start?.();
     }
 
     console.log('[Main] STT Provider reconfigured');
@@ -5442,6 +5554,29 @@ export class AppState {
       this._pendingTeardown = null;
     }
     this._transcriptSessionId += 1;
+    this._localWhisperSequenceCoordinator.beginMeeting(this._transcriptSessionId);
+    const captureOriginMonotonicMs = performance.now();
+    this._captureOriginMonotonicMs = captureOriginMonotonicMs;
+    this.googleSTT?.beginSession?.(this._transcriptSessionId, captureOriginMonotonicMs);
+    this.googleSTT_User?.beginSession?.(this._transcriptSessionId, captureOriginMonotonicMs);
+    if (configuredSttProvider === 'alibaba-fun-asr') {
+      this.initializeAlibabaFunAsrProviderPair();
+      try {
+        this.alibabaFunAsrPair?.beginSession(
+          this._transcriptSessionId,
+          captureOriginMonotonicMs,
+        );
+      } catch (error) {
+        this.googleSTT?.stop();
+        this.googleSTT_User?.stop();
+        this.googleSTT?.removeAllListeners();
+        this.googleSTT_User?.removeAllListeners();
+        this.googleSTT = null;
+        this.googleSTT_User = null;
+        this.alibabaFunAsrPair = null;
+        throw error;
+      }
+    }
 
     // PR #173: Reset audio recovery state for fresh session
     this._systemAudioRecoveryInProgress = false;
@@ -5675,10 +5810,10 @@ export class AppState {
           // Give the interviewer/system channel the ONNX slot before the user
           // channel so system audio has first crack at the shared worker pool.
           this.systemAudioCapture?.start();
-          this.googleSTT?.start();
+          this.googleSTT?.start?.();
           systemSttStartedByInit = true;
 
-          this.googleSTT_User?.start();
+          this.googleSTT_User?.start?.();
           userSttStartedByInit = true;
         } else {
           console.log('[Main] Ambient AI Chat enabled — skipping mic/system audio capture and STT for this session.');
@@ -5882,10 +6017,21 @@ export class AppState {
     // there's no active capture to rebind.
     this.stopDefaultOutputWatcher();
 
-    // Tell STT to mark the audio stream as ended; trailing finals will arrive
-    // over the next ~150ms while we're already returning to the renderer.
-    this.googleSTT?.finalize?.();
-    this.googleSTT_User?.finalize?.();
+    // Snapshot the providers before background teardown. finalize() is invoked
+    // exactly once per provider now, while transcript draining is active; the
+    // returned promises are awaited below before these same instances stop.
+    const drainingSttProviders = [this.googleSTT, this.googleSTT_User]
+      .filter((provider): provider is STTProvider => provider !== null);
+    const finishPromises = drainingSttProviders.map((provider, index) => {
+      try {
+        return Promise.resolve(provider.finalize?.()).catch((error) => {
+          console.warn(`[Main] STT finalize rejected (${index === 0 ? 'system' : 'mic'}):`, error);
+        });
+      } catch (error) {
+        console.warn(`[Main] STT finalize threw (${index === 0 ? 'system' : 'mic'}):`, error);
+        return Promise.resolve();
+      }
+    });
 
     // ─── BACKGROUND: STT drain + meeting save + RAG embed ────────────────
     // Note: `isMeetingActive` was already flipped to false synchronously above
@@ -5928,13 +6074,24 @@ export class AppState {
           console.error('[Main] Failed to revert model:', e);
         }
 
-        // 1. Grace window for STT trailing finals (Google/Soniox/Deepgram all
-        //    reply to finalize() within 100–200ms). 250ms is conservative.
-        await new Promise(resolve => setTimeout(resolve, 250));
+        // 1. Wait for Promise-aware providers (Fun-ASR resolves on task-finished)
+        //    while retaining the legacy 250ms grace used by void finalizers.
+        //    The 2s cap guarantees teardown cannot wedge a subsequent meeting.
+        const drainResult = await waitForSttDrain(finishPromises, 2000, { minimumWaitMs: 250 });
+        if (drainResult === 'timed-out') {
+          console.warn('[Main] STT drain deadline reached; forcing provider stop.', {
+            providerCount: drainingSttProviders.length,
+          });
+        }
 
-        // 2. Tear down STT sockets now that finals have arrived.
-        this.googleSTT?.stop();
-        this.googleSTT_User?.stop();
+        // 2. Tear down the exact provider instances that were finalized.
+        drainingSttProviders.forEach((provider, index) => {
+          try {
+            provider.stop();
+          } catch (error) {
+            console.warn(`[Main] STT stop threw (${index === 0 ? 'system' : 'mic'}):`, error);
+          }
+        });
 
         // 3. Snapshot transcript + persist placeholder + queue title/summary LLM.
         //    intelligenceManager.stopMeeting itself runs LLM in background.
@@ -6048,8 +6205,14 @@ export class AppState {
     // names + preload bridges are kept (defense-in-depth, no callers).
     type BatchKind = 'suggested_answer' | 'refined_answer' | 'recap' | 'clarify' | 'follow_up_questions';
     const tokenBatches = new Map<BatchKind, any[]>();
+    let pendingFlushHandle: NodeJS.Immediate | null = null;
     let batchFlushScheduled = false;
     const flushBatchesNow = () => {
+      if (pendingFlushHandle) {
+        clearImmediate(pendingFlushHandle);
+        pendingFlushHandle = null;
+      }
+      batchFlushScheduled = false;
       const win = mainWindow();
       if (!win) { tokenBatches.clear(); return; }
       for (const [kind, items] of tokenBatches.entries()) {
@@ -6062,7 +6225,8 @@ export class AppState {
     const scheduleBatchFlush = () => {
       if (batchFlushScheduled) return;
       batchFlushScheduled = true;
-      setImmediate(() => {
+      pendingFlushHandle = setImmediate(() => {
+        pendingFlushHandle = null;
         batchFlushScheduled = false;
         flushBatchesNow();
       });
@@ -6254,11 +6418,11 @@ export class AppState {
     process.env.GOOGLE_APPLICATION_CREDENTIALS = keyPath;
 
     if (this.googleSTT) {
-      this.googleSTT.setCredentials(keyPath);
+      this.googleSTT.setCredentials?.(keyPath);
     }
 
     if (this.googleSTT_User) {
-      this.googleSTT_User.setCredentials(keyPath);
+      this.googleSTT_User.setCredentials?.(keyPath);
     }
   }
 

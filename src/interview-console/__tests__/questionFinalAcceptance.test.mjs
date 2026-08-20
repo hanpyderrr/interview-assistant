@@ -39,6 +39,13 @@ test('a short technical follow-up is accepted', () => {
   );
 });
 
+test('a short factual continuation is preserved even when it is not a question by itself', () => {
+  assert.equal(
+    shouldAcceptQuestionFinal([turn(RICH_QUESTION)], { text: '补充是32位' }),
+    true,
+  );
+});
+
 test('a normal rich interviewer final is accepted', () => {
   assert.equal(
     shouldAcceptQuestionFinal([turn(RICH_QUESTION)], { text: '那线程安全怎么保证？' }),

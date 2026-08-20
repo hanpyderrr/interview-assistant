@@ -49,7 +49,8 @@ export {
   trimToSpeakable, applySpeakabilityBudget, compressTechnicalConcept,
   classifySpeakability, classifyTargetSpeakability,
   classifyShortBand, shortBandTargetWords,
-  SOFT_MIN_WORDS, SOFT_MAX_WORDS, HARD_MAX_WORDS, HARD_MAX_SECONDS, SPOKEN_FULL_MAX_WORDS,
+  SOFT_MIN_WORDS, SOFT_MAX_WORDS, HARD_MAX_WORDS, HARD_MAX_SECONDS,
+  BEHAVIORAL_SOFT_MAX_WORDS, SPOKEN_FULL_MAX_WORDS,
 } from "./speakability";
 export type { SpeakabilityDecision, SpeakabilityClass, SpeakabilityTarget, ShortLengthBand, ShortBandTarget } from "./speakability";
 export { checkAnswerForCodeBugs, checkCodeCompleteness } from "./CodeSanityCheck";

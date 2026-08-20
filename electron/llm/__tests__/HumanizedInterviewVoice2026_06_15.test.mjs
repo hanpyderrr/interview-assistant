@@ -32,7 +32,10 @@ describe('HUMAN_SPOKEN_ANSWER_CONTRACT — content', () => {
   test('mandates first person + plain speech + no source narration', () => {
     const c = prompts.HUMAN_SPOKEN_ANSWER_CONTRACT.toLowerCase();
     assert.ok(c.includes('first person'));
-    assert.ok(c.includes('2-4 sentences') || c.includes('2-4'));
+    assert.match(c, /15 to 35 words/);
+    assert.match(c, /25 to 55 words/);
+    assert.match(c, /60 to 110 words/);
+    assert.match(c, /explicit[\s\S]{0,80}(?:length|detail|format)[\s\S]{0,80}override/);
     assert.ok(c.includes('based on my resume') || c.includes('according to the jd') || c.includes('the candidate'));
   });
 

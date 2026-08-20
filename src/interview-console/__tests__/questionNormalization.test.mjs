@@ -23,7 +23,8 @@ test('keeps empty and already normalized questions stable', () => {
 });
 
 test('converts traditional Chinese without rewriting Latin technical terms', () => {
-  assert.equal(normalizeInterviewQuestion('我們聊一下 SBI 驅動怎麼設計'), '我们聊一下 SBI 驱动怎么设计');
+  // SBI is intentionally rewritten to SPI now; use an uncorrected term here.
+  assert.equal(normalizeInterviewQuestion('我們聊一下 OpenGL 驅動怎麼設計'), '我们聊一下 OpenGL 驱动怎么设计');
 });
 
 test('converts Taiwan and Hong Kong traditional forms without localizing vocabulary', () => {

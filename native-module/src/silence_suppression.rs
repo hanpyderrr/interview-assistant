@@ -69,9 +69,9 @@ impl Default for SilenceSuppressionConfig {
 }
 
 impl SilenceSuppressionConfig {
-    /// Create config for system audio (very permissive - system audio is quieter).
-    /// Disables VAD because system audio (e.g., YouTube, games) often contains non-human
-    /// sounds which the ML VAD model rigidly suppresses, breaking the STT pipeline (#127).
+    /// Create config for system audio (volume gate stays permissive because loopback is quieter).
+    /// Downstream segmentation owns content gating; applying WebRTC VAD here as well can
+    /// irreversibly remove quiet word onsets before the segmenter can preserve them.
     pub fn for_system_audio() -> Self {
         Self {
             speech_threshold_rms: 30.0,
@@ -82,7 +82,7 @@ impl SilenceSuppressionConfig {
             ema_alpha: 0.02,
             native_sample_rate: 48000,
             use_vad: false,
-            vad_mode: VadMode::Quality, // ignored when use_vad is false
+            vad_mode: VadMode::Quality,
         }
     }
 
@@ -373,6 +373,12 @@ pub fn generate_silence_frame(size: usize) -> Vec<i16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_system_audio_leaves_content_gating_to_downstream_segmenter() {
+        let config = SilenceSuppressionConfig::for_system_audio();
+        assert!(!config.use_vad, "system loopback must not be destructively gated twice");
+    }
 
     #[test]
     fn test_speech_immediate() {

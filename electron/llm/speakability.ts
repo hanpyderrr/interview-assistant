@@ -13,26 +13,26 @@
 //   - decideSpeakability — classify {wordCount, seconds, overBudget, exception, reason}.
 //     An EXCEPTION means the answer is ALLOWED to be long (code / detail / system design /
 //     lecture / step-by-step) and must never be trimmed.
-//   - trimToSpeakable — a conservative tail-trimmer that ONLY fires above the HARD cap and
-//     never when an exception applies, never on a fenced answer, never below 2 sentences,
-//     and never drops the lead sentence. The prompt does the real shortening; this is the
-//     rare safety net.
+//   - trimToSpeakable — retained as a compatibility no-op. Prompt guidance controls length;
+//     deterministic post-processing never cuts a generated answer.
 //
 // Pure, deterministic, no LLM, no I/O, no profile strings.
 
 import type { AnswerType } from './AnswerPlanner';
 import type { AnswerStyle } from './answerStyle';
 
-// Spoken-length thresholds. Soft target 45-85 words; SPOKEN_SHORT hard ceiling 100 words / 35s.
+// Legacy telemetry thresholds retained for historical dashboard compatibility. These are
+// measure-only and intentionally independent from the 15-35 / 25-55 generation targets below.
 export const SOFT_MIN_WORDS = 45;
 export const SOFT_MAX_WORDS = 85;
 export const HARD_MAX_WORDS = 100;
 export const HARD_MAX_SECONDS = 35;
-// SPOKEN_FULL soft ceiling. A fuller spoken answer (negotiation, ethical, tradeoff, behavioral
-// with context, multi-part) targets ~100-180 words. This is PROMPT-ONLY guidance: the
-// deterministic trimmer never fires on SPOKEN_FULL (it would risk cutting a nuanced answer
-// mid-thought). Only SPOKEN_SHORT is auto-trimmed (above HARD_MAX_WORDS).
-export const SPOKEN_FULL_MAX_WORDS = 180;
+// Behavioral SPOKEN_FULL answers have a 110-word soft ceiling. Other fuller answers
+// (negotiation, ethical, tradeoff, multi-part) use the length accuracy requires. This is
+// PROMPT-ONLY guidance: the deterministic trimmer never fires on SPOKEN_FULL.
+export const BEHAVIORAL_SOFT_MAX_WORDS = 110;
+/** @deprecated Use BEHAVIORAL_SOFT_MAX_WORDS. Retained for API compatibility. */
+export const SPOKEN_FULL_MAX_WORDS = BEHAVIORAL_SOFT_MAX_WORDS;
 // Average speaking rate for an interview/meeting answer (words per minute).
 const WORDS_PER_MINUTE = 140;
 
@@ -86,6 +86,8 @@ const STRUCTURED_FULL_STYLES: ReadonlySet<AnswerStyle> = new Set<AnswerStyle>([
 /** The question explicitly asks for a long/structured answer. */
 const DETAIL_REQUEST_RE =
   /\b(in\s+detail|in[- ]depth|walk\s+me\s+through|step[- ]by[- ]step|deep[- ]dive|elaborate|full\s+(?:answer|solution|code)|system\s+design|write\s+(?:the\s+)?code|lecture\s+notes|explain\s+(?:the\s+)?(?:approach|each|every)\b)/i;
+const CHINESE_DETAIL_REQUEST_RE =
+  /(?:详细(?:说明|解释|介绍|展开)|分步骤(?:说明|解释|介绍)|逐步(?:说明|解释|介绍)|完整(?:说明|解释|介绍)|系统设计|写(?:出)?(?:完整)?代码)/;
 
 export interface SpeakabilityDecision {
   wordCount: number;
@@ -94,7 +96,7 @@ export interface SpeakabilityDecision {
   target: SpeakabilityTarget;
   /** Over the SPOKEN_SHORT ceiling (100 words OR 35s) — only meaningful for SPOKEN_SHORT. */
   overBudget: boolean;
-  /** Over the soft 85-word target (telemetry only — not enforced). */
+  /** Over the legacy 85-word telemetry threshold (measure-only — not enforced). */
   overSoftTarget: boolean;
   /** True when the answer is ALLOWED to be long (never trim): SPOKEN_FULL or STRUCTURED_FULL. */
   exception: boolean;
@@ -106,8 +108,8 @@ export interface SpeakabilityDecision {
  * Coarse, marker-only classification of a spoken answer's length — for telemetry
  * (the spoken-answer-quality spec's `speakability_class` field). No raw content.
  *   - 'exempt'      : allowed to be long (SPOKEN_FULL or STRUCTURED_FULL — never trimmed)
- *   - 'over_budget' : a SPOKEN_SHORT answer over the 100-word / 35s ceiling (would trim)
- *   - 'over_soft'   : a SPOKEN_SHORT answer over the 85-word soft target, under the ceiling
+ *   - 'over_budget' : a SPOKEN_SHORT answer over the 100-word / 35s ceiling (measure-only)
+ *   - 'over_soft'   : a SPOKEN_SHORT answer over the legacy 85-word soft threshold, under the ceiling
  *   - 'standard'    : within the soft target
  */
 export type SpeakabilityClass = 'exempt' | 'over_budget' | 'over_soft' | 'standard';
@@ -124,8 +126,8 @@ export function classifySpeakability(decision: SpeakabilityDecision): Speakabili
  * Pre-generation target for the answer shape. This is NOT the same thing as
  * `SpeakabilityClass` above: the target says how the answer should be shaped before
  * the model speaks; `SpeakabilityClass` measures what actually came back after
- * generation. This target is telemetry / soft prompt guidance only — the verified
- * post-generation budget below remains the enforcement backstop.
+ * generation. Classification is measure-only; post-generation handling is a compatibility
+ * no-op and never truncates model output.
  */
 export type SpeakabilityTarget = 'SPOKEN_SHORT' | 'SPOKEN_FULL' | 'STRUCTURED_FULL';
 
@@ -163,7 +165,8 @@ const CONTEXTUAL_PRESSURE_RE =
  *     notes / step-by-step / explicit "in detail"). Uncapped.
  *   - SPOKEN_FULL: still spoken, but a short answer would be unreliable — negotiation,
  *     ethical/safety with caveats, tradeoffs/comparisons, behavioral with real context,
- *     multi-part, or "expand/justify/defend" follow-ups. ~100-180 (prompt-only ceiling).
+ *     multi-part, or "expand/justify/defend" follow-ups. Behavioral answers target 60-110
+ *     words; other fuller answers use the length accuracy requires.
  *   - SPOKEN_SHORT: the default. <=100 words.
  */
 export function classifyTargetSpeakability(
@@ -175,7 +178,7 @@ export function classifyTargetSpeakability(
   // Structured output (not a spoken paragraph) → uncapped.
   if (STRUCTURED_FULL_TYPES.has(answerType)) return 'STRUCTURED_FULL';
   if (answerStyle && STRUCTURED_FULL_STYLES.has(answerStyle)) return 'STRUCTURED_FULL';
-  if (DETAIL_REQUEST_RE.test(q)) return 'STRUCTURED_FULL';
+  if (DETAIL_REQUEST_RE.test(q) || CHINESE_DETAIL_REQUEST_RE.test(q)) return 'STRUCTURED_FULL';
 
   // Fuller spoken answer needed for reliability/safety → SPOKEN_FULL.
   if (SPOKEN_FULL_TYPES.has(answerType)) return 'SPOKEN_FULL';
@@ -192,14 +195,10 @@ export function classifyTargetSpeakability(
   return 'SPOKEN_SHORT';
 }
 
-// ── Adaptive SPOKEN_SHORT length band (15-30s) ────────────────────────────────
-// Most spoken answers should NOT default to ~30s. Within SPOKEN_SHORT (still <=100 words),
-// pick a 15-30s band from the question's intent so a yes/no or factual question lands ~15s
-// and a normal interview/concept answer lands ~20-25s. This is PROMPT-GUIDANCE only — the
-// deterministic trimmer is unchanged (only the 100-word ceiling is hard-enforced). The model
-// gauges WITHIN the band using the meeting context it already has in the prompt.
-//
-// At ~140 wpm: 15s≈35 words, 20s≈47, 25s≈58, 30s≈70.
+// ── Adaptive SPOKEN_SHORT length bands ───────────────────────────────────────
+// Pick the shortest complete band from intent: BRIEF 15-35 words, STANDARD 25-55, and
+// reasoning/opinion FULLER 40-55. This is prompt guidance and telemetry only; no band causes
+// deterministic truncation. Seconds are approximate at ~140 wpm.
 export type ShortLengthBand = 'BRIEF' | 'STANDARD' | 'FULLER';
 
 export interface ShortBandTarget {
@@ -210,12 +209,12 @@ export interface ShortBandTarget {
 }
 
 const SHORT_BAND_TARGETS: Record<ShortLengthBand, ShortBandTarget> = {
-  BRIEF:    { min: 25, max: 40, seconds: 15, guidance: 'a tight, direct answer — lead with the point and stop' },
-  STANDARD: { min: 40, max: 60, seconds: 22, guidance: 'a normal spoken answer — the point plus one supporting line' },
-  FULLER:   { min: 55, max: 85, seconds: 30, guidance: 'a slightly fuller answer — the point, a reason, and one concrete detail' },
+  BRIEF:    { min: 15, max: 35, seconds: 15, guidance: 'a tight, direct answer — lead with the point and stop' },
+  STANDARD: { min: 25, max: 55, seconds: 22, guidance: 'a normal spoken answer — the point plus one supporting line' },
+  FULLER:   { min: 40, max: 55, seconds: 25, guidance: 'a slightly fuller reasoning or tradeoff answer — the point, a reason, and one concrete detail' },
 };
 
-/** Target words/seconds for a SPOKEN_SHORT band. All maxes stay within SOFT_MAX_WORDS (85). */
+/** Target words/seconds for a SPOKEN_SHORT band. All maxes stay within SOFT_MAX_WORDS. */
 export function shortBandTargetWords(band: ShortLengthBand): ShortBandTarget {
   return SHORT_BAND_TARGETS[band];
 }
@@ -241,6 +240,15 @@ const POSSESSIVE_WHAT_RE = /\bwhat(?:'s| is| are)\s+(?:your|my|our|their|his|her
 // "…and what happened?") needs a 3-4 sentence story, so it must NOT collapse to BRIEF.
 const STORY_OPENER_RE = /\b(?:ever|time\s+(?:you|when)|tell\s+me\s+about|describe\s+a|what\s+happened|walk\s+me\s+through\s+a)\b/i;
 
+// Chinese live-interview equivalents. Keep these intent-based and conservative: a short
+// definition or yes/no question is BRIEF, while story cues must never collapse to one line.
+const CHINESE_BRIEF_QUESTION_RE =
+  /^(?=.{1,32}[？?]?\s*$)(?:(?:你|您)?(?:会|能|可以|是否|有没有|是不是|需不需要|要不要|了解|用过|使用过|熟悉|知道)|有没有|是否|能否|可否).*(?:吗|嘛|么)?[？?]?\s*$/;
+const CHINESE_DEFINITION_RE =
+  /^(?:什么是|何为)(?!(?:对?(?:你|您|我|我们)(?:来说|而言|的)|(?:你|您)(?:认为|觉得)|贵公司的)).{1,24}[？?]?\s*$/;
+const CHINESE_STORY_OPENER_RE =
+  /(?:曾经|有没有一次|讲(?:一|个)?例子|介绍.*经历|说说.*经历|遇到过|发生了什么)/;
+
 // FULLER signals: the question invites a touch more REASONING depth — "how would you approach",
 // a comparison/choice rationale ("why X over Y"), an opinion/take, or "walk me through your
 // thinking". A bare "why" (e.g. "why should we hire you", "why this role") is a STANDARD answer,
@@ -248,11 +256,13 @@ const STORY_OPENER_RE = /\b(?:ever|time\s+(?:you|when)|tell\s+me\s+about|describ
 // rather than Y", "why not Z"). Behavioral STAR stories are SPOKEN_FULL, handled upstream.
 const FULLER_QUESTION_RE =
   /\bhow\s+would\s+you\b|\bhow\s+do\s+you\s+(?:approach|decide|handle|think\s+about)\b|\bwhat(?:'s| is)\s+your\s+(?:take|view|opinion|approach|reasoning)\b|\bwhat\s+do\s+you\s+think\b|\bwalk\s+me\s+through\s+(?:your\s+)?(?:thinking|approach|reasoning)\b|\btalk\s+me\s+through\b|\bwhy\b[^?]*\b(?:over|instead\s+of|rather\s+than|versus|vs\.?|not)\b/i;
+const CHINESE_FULLER_QUESTION_RE =
+  /(?:(?:你会)?(?:如何|怎么|怎样))(?:权衡|取舍|选择|设计|优化|排查|处理)|(?:谈谈|说说|介绍).{0,8}(?:设计思路|方案取舍)|(?:你的)?(?:看法|观点|思路|设计思路)是什么|方案取舍|你怎么看|为什么.+(?:而不是|不用|不选|相比)/;
 
 /**
  * Choose the SPOKEN_SHORT length band from the question's intent. Signal-based (NOT a closed
  * per-question list) — the principle is "pick the shortest length that fully answers": a yes/no
- * or factual/definition question is BRIEF (~15s), a reasoning/opinion question is FULLER (~30s),
+ * or factual/definition question is BRIEF (~15s), a reasoning/opinion question is FULLER (~25s),
  * and everything else is the STANDARD ~20-25s default. Only meaningful when the tier is
  * SPOKEN_SHORT; callers gate on that. `answerStyle` brevity cues win when present.
  */
@@ -278,10 +288,12 @@ export function classifyShortBand(
     (
       (BRIEF_QUESTION_RE.test(q) && wordCount <= 14) ||
       (DEFINITION_RE.test(q) && !POSSESSIVE_WHAT_RE.test(q)) ||
-      (FACTUAL_LOOKUP_RE.test(q) && wordCount <= 9)
-    ) && !STORY_OPENER_RE.test(q);
+      (FACTUAL_LOOKUP_RE.test(q) && wordCount <= 9) ||
+      CHINESE_BRIEF_QUESTION_RE.test(q) ||
+      CHINESE_DEFINITION_RE.test(q)
+    ) && !STORY_OPENER_RE.test(q) && !CHINESE_STORY_OPENER_RE.test(q);
   // A reasoning / opinion / "how would you" question → FULLER (still SPOKEN_SHORT).
-  const looksFuller = FULLER_QUESTION_RE.test(q);
+  const looksFuller = FULLER_QUESTION_RE.test(q) || CHINESE_FULLER_QUESTION_RE.test(q);
 
   // FULLER wins over BRIEF when both somehow match (a "why is X..." reasoning question).
   if (looksFuller) return 'FULLER';
@@ -290,13 +302,13 @@ export function classifyShortBand(
 }
 
 /**
- * Classify a spoken answer's length tier and whether the deterministic trimmer may touch it.
+ * Classify a spoken answer's length tier and measure its output length.
  *
  * The tier (classifyTargetSpeakability) decides everything:
- *   - STRUCTURED_FULL / SPOKEN_FULL → `exception` (never trimmed). SPOKEN_FULL's ~180-word
- *     ceiling is PROMPT-ONLY (user-confirmed "soft 180, never trim"): the trimmer leaves a
+ *   - STRUCTURED_FULL / SPOKEN_FULL → `exception` (measure-only). The behavioral 110-word
+ *     ceiling is PROMPT-ONLY: post-generation handling leaves a
  *     nuanced negotiation/ethical/tradeoff answer whole rather than risk a mid-thought cut.
- *   - SPOKEN_SHORT → trimmable above the 100-word / 35s ceiling.
+ *   - SPOKEN_SHORT → measured against the 100-word / 35s ceiling, but never trimmed.
  *
  * `isCoding` forces STRUCTURED_FULL when the caller already knows the answer is code, and a
  * fenced code block in `text` does the same (defence in depth — code is never spoken prose).
@@ -317,7 +329,8 @@ export function decideSpeakability(
     ? 'STRUCTURED_FULL'
     : classifyTargetSpeakability(answerType, answerStyle, question);
 
-  // SPOKEN_FULL and STRUCTURED_FULL are both "never trim". Only SPOKEN_SHORT is enforced.
+  // All tiers are measured and classified only; no tier is truncated. Budget flags apply only
+  // to SPOKEN_SHORT, while SPOKEN_FULL and STRUCTURED_FULL are reported as exceptions.
   const exception = target !== 'SPOKEN_SHORT';
   // The reason carries the tier PLUS the specific cause, for telemetry/debugging:
   //   "target:STRUCTURED_FULL:is_coding" / ":contains_code_block" / ":answer_type:lecture_answer"
@@ -329,7 +342,7 @@ export function decideSpeakability(
     else if (HAS_FENCE_RE.test(text || '')) cause = ':contains_code_block';
     else if (STRUCTURED_FULL_TYPES.has(answerType)) cause = `:answer_type:${answerType}`;
     else if (answerStyle && STRUCTURED_FULL_STYLES.has(answerStyle)) cause = `:answer_style:${answerStyle}`;
-    else if (DETAIL_REQUEST_RE.test(question || '')) cause = ':detail_requested';
+    else if (DETAIL_REQUEST_RE.test(question || '') || CHINESE_DETAIL_REQUEST_RE.test(question || '')) cause = ':detail_requested';
     exceptionReason = `target:${target}${cause}`;
   }
 
@@ -344,7 +357,7 @@ export function decideSpeakability(
 // SPOKEN_SHORT answer to force it under the cap. But a spoken answer's CONCLUSION usually lives
 // in the last sentence ("...so I'd be productive within a couple of weeks"), so cutting the tail
 // silently amputated the most important half of the answer. Length is now entirely the model's
-// job (the prompt's 15-30s band + the SPOKEN_SHORT/FULL/STRUCTURED tiers); no deterministic pass
+// job (the prompt's concise bands + the SPOKEN_SHORT/FULL/STRUCTURED tiers); no deterministic pass
 // ever cuts a response. There is NO hard length cap on output — a longer answer is allowed when
 // the question needs it. applySpeakabilityBudget (below) measures only.
 export interface TrimResult {
@@ -457,7 +470,7 @@ export function compressTechnicalConcept(
  * deterministic tail-trim cropped the END of an over-100-word answer, and a spoken answer's
  * conclusion ("...so I'd be productive within a couple of weeks") often lives in the last
  * sentence — dropping it silently mangled the answer. Length is now 100% the model's job via
- * the prompt (the 15-30s band + the SPOKEN_SHORT/FULL/STRUCTURED tiers); nothing here ever cuts
+ * the prompt (the concise bands + the SPOKEN_SHORT/FULL/STRUCTURED tiers); nothing here ever cuts
  * a response. This function is retained ONLY to measure the answer for telemetry (word count,
  * seconds, the coarse class) — `text` is returned verbatim and `speakability_budget_applied` is
  * always false, so both call sites (which guard on that flag) become no-ops on the answer text.

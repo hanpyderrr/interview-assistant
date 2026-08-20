@@ -14,7 +14,7 @@
     "postinstall": "patch-package && cross-env SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm rebuild sharp && node scripts/rebuild-native-electron.js && node scripts/download-models.js && node scripts/ensure-sqlite-vec.js && node scripts/patch-electron-plist.js && node scripts/verify-native-arch.js",
     "rebuild:native": "node scripts/rebuild-native-electron.js && node scripts/verify-native-arch.js",
     "prepare": "husky",
-    "electron:dev": "npm run build && npm run build:electron && cross-env NODE_ENV=development electron .",
+    "electron:dev": "npm run build && npm run build:electron && cross-env NODE_ENV=development NATIVELY_WHISPER_FORCE_CPU=1 electron .",
     "electron:build": "npm run build:electron && cross-env NODE_ENV=production electron .",
     "app:dev": "concurrently --kill-others --kill-signal SIGKILL \"npm run dev -- --port 5180 --strictPort\" \"wait-on http://localhost:5180 && npm run electron:dev\"",
     "app:build": "npm run build && npm run typecheck:electron && npm run build:electron && cross-env NATIVELY_BUILD_ALL_MAC_ARCHES=1 npm run build:native && node scripts/ensure-sharp-mac-deps.js && node scripts/ensure-sqlite-vec.js && npm run verify:packaged-local-assets && node scripts/package-app.js",

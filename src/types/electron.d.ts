@@ -92,6 +92,11 @@ export interface ElectronAPI {
     dy?: number
     phase?: 'start' | 'move' | 'end'
   }) => Promise<void>
+  sendLauncherWindowDrag?: (delta: {
+    dx?: number
+    dy?: number
+    phase?: 'start' | 'move' | 'end'
+  }) => Promise<void>
   isOverlayGroupDragManaged?: () => Promise<boolean>
   onOverlayUiAction?: (callback: (action: { type: string }) => void) => () => void
   sendOverlayToggleAnchor?: (payload: { panelRight: number }) => Promise<void>
@@ -451,6 +456,10 @@ export interface ElectronAPI {
   onGeminiStreamToken: (callback: (token: string, meta?: { streamId?: number }) => void) => () => void
   onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number }) => void) => () => void
   onGeminiStreamError: (callback: (error: string, meta?: { streamId?: number | null; source?: string }) => void) => () => void;
+  cleanupCandidateSpeech: (text: string) => Promise<{ status: 'cleaned' | 'original'; text: string }>;
+  cancelCandidateSpeechCleanup: () => void;
+  correctTranscriptText: (text: string) => Promise<{ status: 'corrected' | 'original'; text: string }>;
+  cancelTranscriptTextCorrection: () => void;
 
   // NOTE: onSkillsChanged broadcast subscription was removed. Skills are
   // toggled only via delete; the picker refreshes on Settings unmount, and

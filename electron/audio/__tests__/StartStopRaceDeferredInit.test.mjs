@@ -80,8 +80,8 @@ test('deferred audio init aborts and destroys stale captures after awaited setup
     'BUG: stale deferred audio init must not stop STT/RAG work unless this stale init started it.',
   );
   assert.ok(
-    /this\.googleSTT\?\.start\s*\(\s*\);[\s\S]*systemSttStartedByInit\s*=\s*true/.test(deferredInit) &&
-      /this\.googleSTT_User\?\.start\s*\(\s*\);[\s\S]*userSttStartedByInit\s*=\s*true/.test(deferredInit) &&
+    /this\.googleSTT\?\.start(?:\?\.)?\s*\(\s*\);[\s\S]*systemSttStartedByInit\s*=\s*true/.test(deferredInit) &&
+      /this\.googleSTT_User\?\.start(?:\?\.)?\s*\(\s*\);[\s\S]*userSttStartedByInit\s*=\s*true/.test(deferredInit) &&
       /this\.ragManager\.startLiveIndexing\s*\([^)]*\);[\s\S]*liveIndexingStartedByInit\s*=\s*true/.test(deferredInit),
     'BUG: deferred audio init must set STT/RAG ownership flags immediately after starting those resources.',
   );

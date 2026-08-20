@@ -19,22 +19,21 @@ describe('tiny spoken-length rule is in the spoken tiny prompts', () => {
     test(`${name} carries the length rule`, () => {
       assert.match(tiny[name], LENGTH_MARK, `${name} must carry the spoken-length rule`);
     });
-    test(`${name} states the 100-word ceiling + blunt no-tutorial rule`, () => {
-      assert.match(tiny[name], /never over 100|under 85 words/i);
+    test(`${name} states the concise budgets + blunt no-tutorial rule`, () => {
+      assert.match(tiny[name], /15 to 35 words/i);
+      assert.match(tiny[name], /25 to 55 words/i);
       // The blunt no-tutorial rule for generic tech concepts, synced from the full tier
       // 2026-06-16: a concept answer must not be documentation (no heading/bullet/code).
       assert.match(tiny[name], /not a tutorial|NOT documentation/i);
       assert.match(tiny[name], /heading|bullet|code block/i);
     });
-    test(`${name} states the adaptive 15-30s band (not pinned to ~30s)`, () => {
-      assert.match(tiny[name], /15 to 30 seconds/i);
-      assert.match(tiny[name], /shortest|don'?t default to the max|~?15s/i);
+    test(`${name} states the behavioral budget and implicit STAR shape`, () => {
+      assert.match(tiny[name], /60 to 110 words/i);
+      assert.match(tiny[name], /implicit STAR/i);
     });
-    test(`${name} allows a fuller answer (principle, not a fixed list)`, () => {
-      // The tiny rule now also teaches the SPOKEN_FULL escape hatch: go fuller when a
-      // short answer would be incomplete/misleading/unsafe.
-      assert.match(tiny[name], /fuller|up to ~?180/i);
-      assert.match(tiny[name], /incomplete|misleading|unsafe/i);
+    test(`${name} allows non-behavioral fuller answers when accuracy requires`, () => {
+      assert.match(tiny[name], /ethical|multi-part/i);
+      assert.match(tiny[name], /accurate|complete/i);
     });
   }
 });

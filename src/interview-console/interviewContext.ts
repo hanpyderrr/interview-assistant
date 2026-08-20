@@ -13,6 +13,7 @@ export interface InterviewTurn {
 export interface InterviewContextOptions {
   maxTurns?: number;
   maxChars?: number;
+  includeCandidateSpeech?: boolean;
 }
 
 const DEFAULT_MAX_TURNS = 6;
@@ -176,8 +177,12 @@ export function buildRecentInterviewContext(
 ): string {
   const maxTurns = boundedInteger(options.maxTurns, DEFAULT_MAX_TURNS, HARD_MAX_TURNS);
   const maxChars = boundedInteger(options.maxChars, DEFAULT_MAX_CHARS, HARD_MAX_CHARS);
+  const includeCandidateSpeech = options.includeCandidateSpeech !== false;
   const usable = turns
-    .filter((turn) => turn?.final === true && isSpeaker(turn.speaker) && Boolean(cleanText(turn.text)))
+    .filter((turn) => turn?.final === true
+      && isSpeaker(turn.speaker)
+      && (includeCandidateSpeech || turn.speaker !== 'user')
+      && Boolean(cleanText(turn.text)))
     .slice(-maxTurns);
 
   const selected: string[] = [];

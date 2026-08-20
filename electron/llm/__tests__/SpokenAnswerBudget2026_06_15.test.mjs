@@ -145,7 +145,7 @@ describe('classifyTargetSpeakability — tier classification (signal-based)', ()
   }
 });
 
-describe('SPOKEN_FULL tier — never trimmed (soft 180, prompt-only)', () => {
+describe('SPOKEN_FULL tier — never trimmed (soft guidance, prompt-only)', () => {
   const fullCases = [
     ['negotiation', 'negotiation_answer', 'they lowballed my salary, how do I push back'],
     ['behavioral with context', 'behavioral_interview_answer', 'tell me about a time you had conflict'],
@@ -160,15 +160,15 @@ describe('SPOKEN_FULL tier — never trimmed (soft 180, prompt-only)', () => {
       assert.equal(d.overBudget, false);
       assert.equal(trimToSpeakable(proseOf(150), d).changed, false);
     });
-    test(`${label}: even a 250-word answer is NOT trimmed (soft 180, never trim)`, () => {
+    test(`${label}: even a 250-word answer is NOT trimmed`, () => {
       const d = decideSpeakability(proseOf(250), type, 'default', q, false);
       assert.equal(d.target, 'SPOKEN_FULL');
       assert.equal(trimToSpeakable(proseOf(250), d).changed, false);
     });
   }
 
-  test('SPOKEN_FULL_MAX_WORDS is the documented soft ceiling (180), not a trim threshold', () => {
-    assert.equal(SPOKEN_FULL_MAX_WORDS, 180);
+  test('SPOKEN_FULL_MAX_WORDS is the behavioral soft ceiling (110), not a trim threshold', () => {
+    assert.equal(SPOKEN_FULL_MAX_WORDS, 110);
   });
 });
 
@@ -199,10 +199,9 @@ describe('SPOKEN_SHORT tier — measured but NEVER trimmed (no output truncation
   });
 });
 
-// ── Adaptive 15-30s band within SPOKEN_SHORT (2026-06-16) ────────────────────
-// Most spoken answers should land 15-30s by question intent, not always ~30s. classifyShortBand
-// picks BRIEF/STANDARD/FULLER (prompt-guidance only — the trimmer is unchanged).
-describe('classifyShortBand — adaptive 15-30s band (signal-based)', () => {
+// ── Adaptive concise bands within SPOKEN_SHORT (2026-06-16) ──────────────────
+// classifyShortBand picks BRIEF/STANDARD/FULLER by intent (prompt guidance only).
+describe('classifyShortBand — adaptive concise bands (signal-based)', () => {
   const cases = [
     // BRIEF (~15s): yes/no, single fact, definition.
     ['BRIEF', 'jd_fit_answer', 'default', 'Are you available Monday?'],
@@ -224,7 +223,7 @@ describe('classifyShortBand — adaptive 15-30s band (signal-based)', () => {
     ['STANDARD', 'jd_fit_answer', 'default', "What's your management style?"],
     ['BRIEF', 'technical_concept_answer', 'default', 'What is the CAP theorem?'],
     ['BRIEF', 'technical_concept_answer', 'default', 'What is a closure?'],
-    // FULLER (~30s, still SPOKEN_SHORT): reasoning / comparison / "how would you".
+    // FULLER (~25s, still SPOKEN_SHORT): reasoning / comparison / "how would you".
     ['FULLER', 'jd_fit_answer', 'default', 'Why would you pick Redis over Memcached?'],
     ['FULLER', 'technical_concept_answer', 'default', 'How would you approach scaling this?'],
     ['FULLER', 'jd_fit_answer', 'default', "What's your take on microservices?"],
@@ -246,14 +245,17 @@ describe('classifyShortBand — adaptive 15-30s band (signal-based)', () => {
   }
 });
 
-describe('shortBandTargetWords — monotonic, within the soft ceiling', () => {
-  test('BRIEF < STANDARD < FULLER, all <= SOFT_MAX_WORDS (85)', () => {
+describe('shortBandTargetWords — tiered, within the normal-answer ceiling', () => {
+  test('FULLER raises the minimum but shares the 55-word maximum', () => {
     const b = shortBandTargetWords('BRIEF');
     const s = shortBandTargetWords('STANDARD');
     const f = shortBandTargetWords('FULLER');
     assert.ok(b.max < s.max, 'BRIEF max < STANDARD max');
-    assert.ok(s.max < f.max, 'STANDARD max < FULLER max');
-    assert.ok(f.max <= SOFT_MAX_WORDS, 'FULLER max <= 85');
+    assert.ok(s.min < f.min, 'STANDARD min < FULLER min');
+    assert.equal(s.max, f.max, 'STANDARD and FULLER share the normal-answer maximum');
+    assert.equal(f.max, 55, 'FULLER uses the normal-answer generation maximum');
+    assert.equal(SOFT_MAX_WORDS, 85, 'legacy telemetry threshold remains independent');
+    assert.notEqual(f.max, SOFT_MAX_WORDS, 'generation target is not the telemetry threshold');
     assert.ok(f.max <= HARD_MAX_WORDS, 'all bands stay within the hard ceiling');
     // seconds rise with the band.
     assert.ok(b.seconds < s.seconds && s.seconds <= f.seconds);
@@ -316,10 +318,10 @@ describe('formatAnswerPlanForPrompt — injects a concrete LENGTH target for SPO
     assert.match(line, /about 15s/);
   });
 
-  test('a FULLER question gets a ~30s / larger-word target', () => {
+  test('a FULLER question gets a ~25s reasoning target', () => {
     const { line } = lengthLine('Why would you pick Redis over Memcached?');
     assert.ok(line, 'expected a LENGTH directive');
-    assert.match(line, /about 30s/);
+    assert.match(line, /about 25s/);
   });
 
   test('a STANDARD question gets a ~20-25s target', () => {

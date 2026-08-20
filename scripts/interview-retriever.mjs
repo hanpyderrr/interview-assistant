@@ -19,6 +19,32 @@ function terms(value) {
   return new Set([...latin, ...chinese]);
 }
 
+const PROJECT_PATTERNS = {
+  tof: /单光子|\btof\b|tcspc|pf32|getnextframes|intel\s*n97/i,
+  temperature: /冰体|109\s*(?:个|路|点)|stm32f767|\bf767\b|onenet|多点温度/i,
+  wing: /机翼结冰|ad5940|冰风洞|fl-?61|运-?12/i,
+};
+
+function projectTags(value) {
+  const text = String(value ?? '');
+  return new Set(Object.entries(PROJECT_PATTERNS)
+    .filter(([, pattern]) => pattern.test(text))
+    .map(([project]) => project));
+}
+
+function projectScore(question, entry) {
+  const queryProjects = projectTags(question);
+  if (queryProjects.size === 0) return 0;
+  const entryProjects = projectTags([
+    entry.title,
+    entry.category,
+    ...(entry.keywords ?? []),
+    entry.content,
+  ].join(' '));
+  if ([...queryProjects].some((project) => entryProjects.has(project))) return 40;
+  return entryProjects.size > 0 ? -20 : 0;
+}
+
 export async function loadKnowledgeBase(fileUrlOrPath) {
   const filePath = fileUrlOrPath instanceof URL ? fileUrlOrPath : path.resolve(fileUrlOrPath);
   const content = await fs.readFile(filePath, 'utf8');
@@ -56,6 +82,7 @@ export function searchKnowledgeBase(question, entries, topK = 5) {
     }
     if (entry.fact_status === 'resume_fact') score += 0.25;
     else if (entry.fact_status === 'prepared_answer') score += 0.15;
+    score += projectScore(question, entry);
     return { entry, score };
   }).filter((result) => result.score > 0)
     .sort((left, right) => right.score - left.score || left.entry.id.localeCompare(right.entry.id))
@@ -72,7 +99,7 @@ export function buildAnswerContext(question, entries, { topK = 5, maxChars = 600
     ...results.map(({ entry, score }) => [
       `- [${entry.id}] 来源等级=${entry.fact_status}，相关度=${score.toFixed(2)}，主题=${entry.title}`,
       `  内容：${entry.content}${entry.fact_status === 'prepared_answer' && entry.personal_claim ? '（此内容含个人主张，必须与简历事实核验）' : ''}`,
-      `  来源：${entry.source_paths.join('；')}`,
+      `  来源：${(entry.source_paths ?? ['未记录来源']).join('；')}`,
     ].join('\n')),
   ];
   const context = sections.join('\n');

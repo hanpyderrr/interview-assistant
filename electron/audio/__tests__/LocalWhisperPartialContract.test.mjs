@@ -11,6 +11,8 @@ const { LocalWhisperSTT } = require(compiledPath);
 
 test('streaming partial carries the current VAD segment id', () => {
   const stt = new LocalWhisperSTT('onnx-community/moonshine-tiny');
+  stt.segmentIdBase = 5;
+  stt.segmentSequence = 5;
   stt.trackedSegmentId = 7;
   stt.skipAgreement = true;
   const events = [];
@@ -20,5 +22,13 @@ test('streaming partial carries the current VAD segment id', () => {
 
   assert.equal(events.length, 1);
   assert.equal(events[0].isFinal, false);
-  assert.equal(events[0].segmentId, 7);
+  assert.equal(events[0].segmentId, 12);
+  const final = stt.normalizeSegment({
+    samples: new Float32Array(1600),
+    durationMs: 100,
+    sequenceId: 7,
+    startMs: 0,
+    endMs: 100,
+  });
+  assert.equal(final.sequenceId, events[0].segmentId);
 });

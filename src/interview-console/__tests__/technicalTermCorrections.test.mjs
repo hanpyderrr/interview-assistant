@@ -43,3 +43,19 @@ test('every correction fixture names a report, audio, and KB canonical term', ()
     }), `${fixture.canonical} must be a token in KB keywords/title`);
   }
 });
+
+test('reassembles uppercase POSIX/DMA/I2C spoken variants', () => {
+  assert.equal(normalizeInterviewQuestion('P O S I X 共享内存'), 'POSIX 共享内存');
+  assert.equal(normalizeInterviewQuestion('P.O.S.I.X. 共享内存'), 'POSIX 共享内存');
+  assert.equal(normalizeInterviewQuestion('P-O-S-I-X 共享内存'), 'POSIX 共享内存');
+  assert.equal(normalizeInterviewQuestion('D M A 通道'), 'DMA 通道');
+  assert.equal(normalizeInterviewQuestion('D.M.A 通道'), 'DMA 通道');
+  assert.equal(normalizeInterviewQuestion('I two C 总线'), 'I2C 总线');
+  assert.equal(normalizeInterviewQuestion('I 2 C 总线'), 'I2C 总线');
+});
+
+test('leaves lowercase spaced acronyms untouched', () => {
+  assert.equal(normalizeInterviewQuestion('s b i 驱动'), 's b i 驱动');
+  assert.equal(normalizeInterviewQuestion('p o s i x 共享内存'), 'p o s i x 共享内存');
+  assert.equal(normalizeInterviewQuestion('d m a 通道'), 'd m a 通道');
+});

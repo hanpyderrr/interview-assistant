@@ -2,7 +2,7 @@
  * Energy-based Voice Activity Detection (VAD) at 16 kHz.
  *
  * Uses 30ms windows (480 samples), RMS threshold 0.008,
- * 700ms hangover (~23 frames), 250ms min speech duration (~8 frames),
+ * 300ms pre-roll/hangover and 120ms min voiced duration (4 frames),
  * and 14000ms max segment duration (force-flush).
  */
 
@@ -11,7 +11,8 @@ import type { SpeechSegment } from './types';
 const WINDOW_SIZE = 480;       // 30ms at 16kHz
 const RMS_THRESHOLD = 0.008;
 const HANGOVER_FRAMES = 10;    // ~300ms — must be shorter than Rust SilenceSuppressor hangover (500ms)
-const MIN_SPEECH_FRAMES = 4;   // ~120ms minimum to avoid transcribing tiny noise bursts
+const MIN_SPEECH_FRAMES = 4;   // ~120ms minimum; count voiced frames only, never hangover
+const PRE_ROLL_FRAMES = 10;    // ~300ms preserves quiet consonants before the energy gate opens
 const MAX_SPEECH_MS = 14000;
 
 function rms(samples: Float32Array, start: number, end: number): number {
@@ -24,11 +25,15 @@ function rms(samples: Float32Array, start: number, end: number): number {
 
 export class VadProcessor {
   private buffer: Float32Array[] = [];
-  private speechBuffer: Float32Array[] = [];
+  private speechBuffer: Array<{ samples: Float32Array; startMs: number; endMs: number }> = [];
+  private speechActivity: boolean[] = [];
+  private preRollBuffer: Array<{ samples: Float32Array; startMs: number; endMs: number }> = [];
   private hangoverCount = 0;
   private inSpeech = false;
   private speechFrameCount = 0;
+  private activeSpeechFrameCount = 0;
   private speechDurationMs = 0;
+  private compressedCursorMs = 0;
   // Monotonic counter incremented every time a new speech segment opens.
   // Allows callers to detect segment transitions even when push() opens-and-
   // closes (or closes-and-reopens) within a single buffer — boolean
@@ -55,6 +60,12 @@ export class VadProcessor {
     while (offset + WINDOW_SIZE <= input.length) {
       const window = input.subarray(offset, offset + WINDOW_SIZE);
       offset += WINDOW_SIZE;
+      const timedFrame = {
+        samples: window.slice(),
+        startMs: this.compressedCursorMs,
+        endMs: this.compressedCursorMs + 30,
+      };
+      this.compressedCursorMs += 30;
 
       const energy = rms(window, 0, window.length);
       const isSpeech = energy >= RMS_THRESHOLD;
@@ -63,16 +74,24 @@ export class VadProcessor {
         this.hangoverCount = HANGOVER_FRAMES;
         if (!this.inSpeech) {
           this.inSpeech = true;
-          this.speechFrameCount = 0;
-          this.speechDurationMs = 0;
-          this.speechBuffer = [];
+          this.speechFrameCount = this.preRollBuffer.length;
+          this.activeSpeechFrameCount = 0;
+          this.speechDurationMs = this.preRollBuffer.length * 30;
+          this.speechBuffer = this.preRollBuffer;
+          this.speechActivity = Array.from({ length: this.preRollBuffer.length }, () => false);
+          this.preRollBuffer = [];
           this.segmentIdCounter++;
         }
+      } else if (!this.inSpeech) {
+        this.preRollBuffer.push(timedFrame);
+        if (this.preRollBuffer.length > PRE_ROLL_FRAMES) this.preRollBuffer.shift();
       }
 
       if (this.inSpeech) {
-        this.speechBuffer.push(window.slice());
+        this.speechBuffer.push(timedFrame);
+        this.speechActivity.push(isSpeech);
         this.speechFrameCount++;
+        if (isSpeech) this.activeSpeechFrameCount++;
         this.speechDurationMs += 30;
 
         if (!isSpeech) {
@@ -86,7 +105,7 @@ export class VadProcessor {
           this.resetSpeech();
         } else if (this.hangoverCount <= 0) {
           // End of speech
-          if (this.speechFrameCount >= MIN_SPEECH_FRAMES) {
+          if (this.activeSpeechFrameCount >= MIN_SPEECH_FRAMES) {
             const seg = this.buildSegment();
             if (seg) segments.push(seg);
           }
@@ -116,13 +135,13 @@ export class VadProcessor {
    */
   peekOpenSegment(): { samples: Float32Array; durationMs: number } | null {
     if (!this.inSpeech || this.speechBuffer.length === 0) return null;
-    const totalLen = this.speechBuffer.reduce((acc, f) => acc + f.length, 0);
+    const totalLen = this.speechBuffer.reduce((acc, f) => acc + f.samples.length, 0);
     if (totalLen === 0) return null;
     const combined = new Float32Array(totalLen);
     let pos = 0;
     for (const frame of this.speechBuffer) {
-      combined.set(frame, pos);
-      pos += frame.length;
+      combined.set(frame.samples, pos);
+      pos += frame.samples.length;
     }
     return { samples: combined, durationMs: this.speechDurationMs };
   }
@@ -142,13 +161,16 @@ export class VadProcessor {
     // open segment so the post-commit transcript starts with continuity.
     const TAIL_FRAMES = Math.min(10, this.speechBuffer.length);
     const tail = TAIL_FRAMES > 0 ? this.speechBuffer.slice(-TAIL_FRAMES) : [];
+    const tailActivity = TAIL_FRAMES > 0 ? this.speechActivity.slice(-TAIL_FRAMES) : [];
 
     this.resetSpeech();
 
     if (tail.length > 0) {
       this.inSpeech = true;
       this.speechBuffer = tail;
+      this.speechActivity = tailActivity;
       this.speechFrameCount = tail.length;
+      this.activeSpeechFrameCount = tailActivity.filter(Boolean).length;
       this.speechDurationMs = tail.length * 30;
       this.hangoverCount = HANGOVER_FRAMES;
       // Tail-keep starts a NEW logical segment (caller should re-stamp any
@@ -175,37 +197,49 @@ export class VadProcessor {
 
   flush(): SpeechSegment[] {
     const segments: SpeechSegment[] = [];
-    if (this.inSpeech && this.speechFrameCount >= MIN_SPEECH_FRAMES) {
+    if (this.inSpeech && this.activeSpeechFrameCount >= MIN_SPEECH_FRAMES) {
       const seg = this.buildSegment();
       if (seg) segments.push(seg);
     }
     this.resetSpeech();
+    this.compressedCursorMs += this.buffer.reduce((total, chunk) => total + chunk.length, 0) / 16;
     this.buffer = [];
+    this.preRollBuffer = [];
     return segments;
   }
 
   reset(): void {
     this.resetSpeech();
     this.buffer = [];
+    this.preRollBuffer = [];
+    this.compressedCursorMs = 0;
   }
 
   private buildSegment(): SpeechSegment | null {
     if (this.speechBuffer.length === 0) return null;
-    const totalLen = this.speechBuffer.reduce((acc, f) => acc + f.length, 0);
+    const totalLen = this.speechBuffer.reduce((acc, f) => acc + f.samples.length, 0);
     const combined = new Float32Array(totalLen);
     let pos = 0;
     for (const frame of this.speechBuffer) {
-      combined.set(frame, pos);
-      pos += frame.length;
+      combined.set(frame.samples, pos);
+      pos += frame.samples.length;
     }
-    return { samples: combined, durationMs: this.speechDurationMs };
+    return {
+      samples: combined,
+      durationMs: this.speechDurationMs,
+      sequenceId: this.segmentIdCounter,
+      startMs: this.speechBuffer[0].startMs,
+      endMs: this.speechBuffer[this.speechBuffer.length - 1].endMs,
+    };
   }
 
   private resetSpeech(): void {
     this.inSpeech = false;
     this.hangoverCount = 0;
     this.speechFrameCount = 0;
+    this.activeSpeechFrameCount = 0;
     this.speechDurationMs = 0;
     this.speechBuffer = [];
+    this.speechActivity = [];
   }
 }

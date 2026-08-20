@@ -119,6 +119,14 @@ test('softCommit starts the next segment without overlapping tail audio', () => 
   assert.ok((second?.startMs ?? 0) >= (first?.endMs ?? 0));
 });
 
+test('a final is stamped with the identity of the open segment, not an independent counter', () => {
+  const vad = new MeetilyVadProcessor();
+  vad.push(frames(12, 0.08));
+  assert.equal(vad.currentSegmentId(), 1);
+  vad.sequenceIdCounter = 41;
+  assert.equal(vad.flush()[0]?.sequenceId, 1);
+});
+
 test('arbitrary chunk boundaries produce the same segment boundaries', () => {
   const whole = runWithChunkPattern([999999]).map(shape);
   const split = runWithChunkPattern([20, 100, 1920, 480, 777]).map(shape);

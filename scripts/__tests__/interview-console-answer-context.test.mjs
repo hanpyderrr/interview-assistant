@@ -16,8 +16,8 @@ const stylesSource = fs.readFileSync(
 
 test('interview console routes microphone and interviewer transcripts separately', () => {
   assert.match(consoleSource, /from '\.\/interviewContext'/);
-  assert.match(consoleSource, /const \[interviewerTranscript, setInterviewerTranscript\] = useState\(''\)/);
-  assert.match(consoleSource, /const \[candidateTranscript, setCandidateTranscript\] = useState\(''\)/);
+  assert.match(consoleSource, /const \[interviewerTranscriptWindow, setInterviewerTranscriptWindow\] = useState<TranscriptDisplayWindow>/);
+  assert.match(consoleSource, /const \[candidateTranscriptWindow, setCandidateTranscriptWindow\] = useState<TranscriptDisplayWindow>/);
   assert.match(consoleSource, /if \(event\.speaker === 'user'\) \{[\s\S]*appendFinalTurn[\s\S]*return/);
   assert.match(consoleSource, /if \(event\.speaker !== 'interviewer'\) return/);
 });
@@ -32,8 +32,48 @@ test('microphone finals enter context but cannot trigger answer generation', () 
   assert.doesNotMatch(consoleSource, /event\.speaker === 'user'[\s\S]{0,500}requestCloudAnswer/);
 });
 
+test('candidate context preference only gates AI context and is available in the main controls', () => {
+  assert.match(consoleSource, /loadCandidateContextEnabled/);
+  assert.match(consoleSource, /saveCandidateContextEnabled/);
+  assert.match(consoleSource, /includeCandidateSpeech:\s*candidateContextEnabledRef\.current/);
+  assert.match(consoleSource, /type="checkbox"[\s\S]{0,300}checked=\{candidateContextEnabled\}/);
+  assert.match(consoleSource, /我的发言供 AI 参考/);
+  assert.match(consoleSource, /关闭后仍会转写和记录/);
+  assert.match(consoleSource, /committedCandidateRef\.current = appendFinalTurn/);
+  assert.match(consoleSource, /acceptCandidateFinal/);
+});
+
+test('candidate cleanup is isolated from raw transcript state and bounded before answer context', () => {
+  assert.match(consoleSource, /createCandidateSpeechCleanupCoordinator/);
+  assert.match(consoleSource, /cleanupCandidateSpeech/);
+  assert.match(consoleSource, /cancelCandidateSpeechCleanup/);
+  assert.match(consoleSource, /candidateCleanupRef\.current\??\.observe\(nextConversation, candidateContextEnabledRef\.current\)/);
+  assert.match(consoleSource, /buildContextTurns\(\s*conversationTurnsRef\.current,\s*candidateContextEnabledRef\.current,\s*300,?\s*\)/);
+  assert.match(consoleSource, /answerPreparationVersionRef/);
+  assert.match(consoleSource, /AI 整理中|AI 已整理|AI 使用原文/);
+  assert.match(consoleSource, /发言片段会调用当前 AI 服务整理/);
+  assert.match(consoleSource, /candidateCleanupRef\.current\??\.cancel\(\)/);
+  assert.match(consoleSource, /committedCandidateRef\.current = appendFinalTurn/);
+  assert.match(consoleSource, /acceptCandidateFinal/);
+});
+
+test('interviewer correction is asynchronous and display-only', () => {
+  assert.match(consoleSource, /createInterviewerDisplayCorrectionCoordinator/);
+  assert.match(consoleSource, /correctTranscriptText/);
+  assert.match(consoleSource, /cancelTranscriptTextCorrection/);
+  assert.match(consoleSource, /interviewerDisplayCorrectionRef\.current\??\.apply\(committedInterviewerRef\.current\)/);
+  assert.match(consoleSource, /void interviewerDisplayCorrectionRef\.current\??\.request\(incoming\)/);
+
+  const rawCommit = consoleSource.indexOf('conversationTurnsRef.current = nextConversation', consoleSource.indexOf("event.speaker !== 'interviewer'"));
+  const roundAccept = consoleSource.indexOf('roundCoordinatorRef.current.acceptInterviewerFinal', rawCommit);
+  const correctionRequest = consoleSource.indexOf('void interviewerDisplayCorrectionRef.current?.request(incoming)', rawCommit);
+  assert.ok(rawCommit >= 0 && roundAccept > rawCommit && correctionRequest > roundAccept,
+    'raw conversation and round answer path must run before the non-awaited display correction');
+  assert.doesNotMatch(consoleSource, /acceptInterviewerFinal\([\s\S]{0,500}(?:corrected|correction)Text/);
+});
+
 test('answer requests include bounded conversation context while retrieval and prompt use the normalized question', () => {
-  assert.match(consoleSource, /buildRecentInterviewContext\(conversationTurnsRef\.current\)/);
+  assert.match(consoleSource, /buildRecentInterviewContext\(conversationTurnsRef\.current,[\s\S]{0,180}includeCandidateSpeech/);
   assert.match(consoleSource, /import \{ normalizeInterviewQuestion \} from '\.\/questionNormalization'/);
   assert.match(consoleSource, /analysisQuestion: normalizeInterviewQuestion\(question\)/);
   assert.match(consoleSource, /buildInterviewConsolePrompt\(job\.analysisQuestion, context, job\.conversationContext\)/);

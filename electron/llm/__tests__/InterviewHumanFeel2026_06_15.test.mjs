@@ -9,14 +9,12 @@ import { test, describe } from 'node:test';
 import * as prompts from '../../../dist-electron/electron/llm/prompts.js';
 
 describe('SPOKEN_ANSWER_CONTRACT — content (3-tier model)', () => {
-  test('states the SPOKEN_SHORT adaptive 15-30s band (not pinned to ~30s)', () => {
+  test('states the concise simple and normal live budgets', () => {
     const c = prompts.SPOKEN_ANSWER_CONTRACT;
     assert.ok(typeof c === 'string' && c.length > 200);
-    assert.match(c, /15 to 30 seconds/);
-    assert.match(c, /(?:never over 100|under 100|100 words)/i);
-    // It must tell the model to PICK within the range, not always max out.
-    assert.match(c, /choose where in that range|do not default to the maximum|pick the shortest/i);
-    assert.match(c, /~?15s|around 25/);
+    assert.match(c, /15 to 35 words/);
+    assert.match(c, /25 to 55 words/);
+    assert.match(c, /shortest complete answer|pick the shortest/i);
   });
 
   test('teaches the three tiers (SPOKEN_SHORT / SPOKEN_FULL / STRUCTURED_FULL)', () => {
@@ -33,7 +31,8 @@ describe('SPOKEN_ANSWER_CONTRACT — content (3-tier model)', () => {
 
   test('SPOKEN_FULL names the cases that need more room (negotiation / tradeoff / ethical / behavioral)', () => {
     const c = prompts.SPOKEN_ANSWER_CONTRACT.toLowerCase();
-    assert.match(c, /100 to 180|up to .*180|~?180/);
+    assert.match(c, /60 to 110 words/);
+    assert.match(c, /one grounded example with implicit STAR/i);
     // at least the safety + negotiation + tradeoff signals are named
     assert.ok(/negotiation|salary/.test(c));
     assert.ok(/ethical|safety|caveat/.test(c));
@@ -73,7 +72,7 @@ describe('SPOKEN_ANSWER_CONTRACT — content (3-tier model)', () => {
   });
 
   test('generic tech question rule: short interview answer, not a tutorial', () => {
-    assert.match(prompts.SPOKEN_ANSWER_CONTRACT, /generic technical question.*tutorial|not a tutorial/is);
+    assert.match(prompts.SPOKEN_ANSWER_CONTRACT, /generic technical (?:question|definition|explanation).*tutorial|not a tutorial/is);
   });
 
   test('carries no profile facts (style-only)', () => {

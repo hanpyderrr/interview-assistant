@@ -483,12 +483,15 @@ benchmark-results/
 /upcoming/
 
 # Local interview-assistant development artifacts
+/.codex-userdata/
+/.codex-runlogs/
 /$wtRoot/
 /backups/
 /session-output/
 /session-output-utf8/
 /session-smoke/
 /ui-smoke.png
+/tmp_kb_extract.txt
 /reports/
 /knowledge_source/*
 !/knowledge_source/README.md

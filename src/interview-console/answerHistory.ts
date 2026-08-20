@@ -15,6 +15,7 @@ export interface InterviewAnswerItem {
   hits: InterviewAnswerHit[];
   status: InterviewAnswerStatus;
   error?: string;
+  replacePending?: boolean;
 }
 
 export interface AnswerHistoryState {
@@ -123,6 +124,7 @@ export function answerHistoryReducer(
         answer: '',
         hits: [],
         status: 'queued',
+        replacePending: false,
       };
       const items = [...state.items.filter((entry) => entry.id !== action.id), item]
         .slice(-state.maxItems);
@@ -145,33 +147,40 @@ export function answerHistoryReducer(
         question: action.question.trim(),
         status: 'generating',
         error: undefined,
+        replacePending: true,
       }));
     case 'token':
       if (!action.token) return state;
       return updateItem(state, action.id, (item) => ({
         ...item,
-        answer: `${item.answer}${action.token}`,
+        answer: item.replacePending && action.token.trim()
+          ? action.token
+          : `${item.answer}${item.replacePending ? '' : action.token}`,
+        replacePending: item.replacePending && !action.token.trim(),
         status: item.status === 'queued' ? 'generating' : item.status,
       }));
     case 'hits':
       return updateItem(state, action.id, (item) => ({ ...item, hits: action.hits.slice() }));
     case 'done':
       return updateItem(state, action.id, (item) => {
-        const finalText = action.finalText || item.answer;
-        if (isProviderNoAnswerPlaceholder(finalText)) {
+        const explicitFinalText = action.finalText;
+        const finalText = hasUsefulProviderAnswer(explicitFinalText) ? explicitFinalText! : item.answer;
+        if (isProviderNoAnswerPlaceholder(explicitFinalText)) {
           if (hasUsefulProviderAnswer(item.answer)) {
             return {
               ...item,
               answer: item.answer,
               status: 'answered' as const,
               error: undefined,
+              replacePending: false,
             };
           }
           return {
             ...item,
             answer: buildLocalFallbackAnswer(item.question, item.hits, '模型超时未返回有效答案'),
             status: 'error' as const,
-            error: finalText ? `模型超时未返回有效答案：${finalText}` : '模型超时未返回有效答案',
+            error: explicitFinalText ? `模型超时未返回有效答案：${explicitFinalText}` : '模型超时未返回有效答案',
+            replacePending: false,
           };
         }
         return {
@@ -179,6 +188,7 @@ export function answerHistoryReducer(
           answer: finalText,
           status: 'answered' as const,
           error: undefined,
+          replacePending: false,
         };
       });
     case 'error':
@@ -187,9 +197,10 @@ export function answerHistoryReducer(
         answer: item.answer || buildLocalFallbackAnswer(item.question, item.hits, action.error),
         status: 'error',
         error: action.error,
+        replacePending: false,
       }));
     case 'interrupted':
-      return updateItem(state, action.id, (item) => ({ ...item, status: 'interrupted' }));
+      return updateItem(state, action.id, (item) => ({ ...item, status: 'interrupted', replacePending: false }));
     case 'select':
       return state.items.some((item) => item.id === action.id) ? { ...state, selectedId: action.id } : state;
     case 'reset':
