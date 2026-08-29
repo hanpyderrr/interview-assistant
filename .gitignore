@@ -493,9 +493,11 @@ benchmark-results/
 /ui-smoke.png
 /tmp_kb_extract.txt
 /reports/
+/output/
+/release-nsis*/
 /knowledge_source/*
 !/knowledge_source/README.md
-!/knowledge_source/embedded_kb.example.jsonl
+!/knowledge_source/interview_kb.example.jsonl
 /realtime_audio/__pycache__/
 /realtime_audio/session-live/
 /realtime_audio/session-output/

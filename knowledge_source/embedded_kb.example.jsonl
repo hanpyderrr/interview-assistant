@@ -1,2 +1,0 @@
-{"id":"qa.example.spi","title":"SPI 驱动设计","category":"embedded","fact_status":"prepared_answer","content":"在这里填写经过确认的面试回答。","source_paths":["user-provided"],"keywords":["SPI","驱动","DMA"]}
-{"id":"qa.example.linux","title":"Linux 启动问题排查","category":"linux","fact_status":"prepared_answer","content":"在这里填写问题分析步骤、使用过的工具和可验证结果。","source_paths":["user-provided"],"keywords":["Linux","启动","日志","驱动"]}

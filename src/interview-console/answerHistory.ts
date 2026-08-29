@@ -1,3 +1,5 @@
+import { INTERVIEW_ANSWER_LEVEL_DEFAULT, type InterviewAnswerLevel } from './interviewAnswerLevel.ts';
+
 export type InterviewAnswerStatus = 'queued' | 'generating' | 'answered' | 'error' | 'interrupted';
 
 export interface InterviewAnswerHit {
@@ -16,6 +18,7 @@ export interface InterviewAnswerItem {
   status: InterviewAnswerStatus;
   error?: string;
   replacePending?: boolean;
+  answerLevel: InterviewAnswerLevel;
 }
 
 export interface AnswerHistoryState {
@@ -25,7 +28,7 @@ export interface AnswerHistoryState {
 }
 
 export type AnswerHistoryAction =
-  | { type: 'enqueue'; id: number; question: string; select?: boolean }
+  | { type: 'enqueue'; id: number; question: string; select?: boolean; answerLevel?: InterviewAnswerLevel }
   | { type: 'start'; id: number }
   | { type: 'revise'; id: number; question: string }
   | { type: 'token'; id: number; token: string }
@@ -82,6 +85,7 @@ export function buildLocalFallbackAnswer(
   question: string,
   hits: InterviewAnswerHit[],
   error?: string,
+  answerLevel: InterviewAnswerLevel = INTERVIEW_ANSWER_LEVEL_DEFAULT,
 ): string {
   const safeQuestion = compactWhitespace(question);
   const safeError = compactWhitespace(error || '');
@@ -93,8 +97,14 @@ export function buildLocalFallbackAnswer(
     ? `模型服务暂时不可用（${safeError}），先用题库命中给一个本地兜底口述稿：`
     : '模型服务暂时不可用，先用题库命中给一个本地兜底口述稿：';
 
+  const levelLead: Record<InterviewAnswerLevel, string> = {
+    student: '按学生/应届口吻，我会先说“我的理解是”，再结合学习或个人项目范围回答，不把通用方案说成生产经历。',
+    mid: '按中级工程师口吻，我会先说明实现路径，再补充常见排查顺序和主要取舍。',
+    senior: '按高级工程师口吻，我会先界定架构约束，再说明可靠性、容量和关键取舍，但不虚构个人经历。',
+  };
+
   if (usefulHits.length === 0) {
-    return `${intro}这个问题是“${safeQuestion || '当前问题'}”。可以先简短说明：我会先确认问题边界，再结合项目中已经做过的部分回答；没有记录的数据我不会编造，会标记为待补充。`;
+    return `${intro}${levelLead[answerLevel]}这个问题是“${safeQuestion || '当前问题'}”。没有记录的数据我不会编造，会标记为待补充。`;
   }
 
   const evidence = usefulHits
@@ -105,7 +115,7 @@ export function buildLocalFallbackAnswer(
     })
     .join(' ');
 
-  return `${intro}可以这样答：这个问题我会结合自己的项目经历来讲。${evidence} 所以我的回答重点是：先说明为什么这样拆分或设计，再补充它带来的稳定性、解耦或性能收益；如果面试官继续追问具体参数，我会明确哪些是项目中记录过的，哪些需要现场确认。`;
+  return `${intro}${levelLead[answerLevel]}可以这样答：${evidence} 所以我的回答重点是：先说明为什么这样拆分或设计，再补充它带来的稳定性、解耦或性能收益；如果面试官继续追问具体参数，我会明确哪些是项目中记录过的，哪些需要现场确认。`;
 }
 
 export function createAnswerHistoryState(maxItems = DEFAULT_MAX_ITEMS): AnswerHistoryState {
@@ -125,6 +135,7 @@ export function answerHistoryReducer(
         hits: [],
         status: 'queued',
         replacePending: false,
+        answerLevel: action.answerLevel ?? INTERVIEW_ANSWER_LEVEL_DEFAULT,
       };
       const items = [...state.items.filter((entry) => entry.id !== action.id), item]
         .slice(-state.maxItems);
@@ -177,7 +188,7 @@ export function answerHistoryReducer(
           }
           return {
             ...item,
-            answer: buildLocalFallbackAnswer(item.question, item.hits, '模型超时未返回有效答案'),
+            answer: buildLocalFallbackAnswer(item.question, item.hits, '模型超时未返回有效答案', item.answerLevel),
             status: 'error' as const,
             error: explicitFinalText ? `模型超时未返回有效答案：${explicitFinalText}` : '模型超时未返回有效答案',
             replacePending: false,
@@ -194,7 +205,7 @@ export function answerHistoryReducer(
     case 'error':
       return updateItem(state, action.id, (item) => ({
         ...item,
-        answer: item.answer || buildLocalFallbackAnswer(item.question, item.hits, action.error),
+        answer: item.answer || buildLocalFallbackAnswer(item.question, item.hits, action.error, item.answerLevel),
         status: 'error',
         error: action.error,
         replacePending: false,

@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { AudioDevices } from './audio/AudioDevices';
+import { localFunAsrServiceManager } from './audio/localFunAsrServiceManager';
 import { DatabaseManager } from './db/DatabaseManager'; // Import Database Manager
 import { AppState } from './main';
 import { CodexCliService } from './services/CodexCliService';
@@ -1040,7 +1041,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   safeHandle('finalize-mic-stt', async () => {
-    appState.finalizeMicSTT();
+    await appState.finalizeMicSTT();
   });
 
   // IPC handler for analyzing image from file path
@@ -7625,34 +7626,32 @@ export function initializeIpcHandlers(appState: AppState): void {
   // STT Provider Management Handlers
   // ==========================================
 
+  const allowedSttProviders = new Set([
+    'none', 'google', 'groq', 'openai', 'deepgram', 'elevenlabs', 'azure',
+    'ibmwatson', 'soniox', 'natively', 'local-whisper', 'alibaba-fun-asr',
+    'local-funasr',
+  ] as const);
+  type AllowedSttProvider = typeof allowedSttProviders extends Set<infer T> ? T : never;
+
   safeHandle(
     'set-stt-provider',
-    async (
-      _,
-      provider:
-        | 'none'
-        | 'google'
-        | 'groq'
-        | 'openai'
-        | 'deepgram'
-        | 'elevenlabs'
-        | 'azure'
-        | 'ibmwatson'
-        | 'soniox'
-        | 'natively'
-        | 'local-whisper'
-        | 'alibaba-fun-asr',
-    ) => {
+    async (_, requestedProvider: unknown) => {
+      if (typeof requestedProvider !== 'string' || !allowedSttProviders.has(requestedProvider as AllowedSttProvider)) {
+        return { success: false, error: 'Invalid STT provider.' };
+      }
+      const provider = requestedProvider as AllowedSttProvider;
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const credentialsManager = CredentialsManager.getInstance();
+      const previousProvider = credentialsManager.getSttProvider();
       try {
-        const { CredentialsManager } = require('./services/CredentialsManager');
-        const persisted = CredentialsManager.getInstance().setSttProvider(provider);
+        const persisted = credentialsManager.setSttProvider(provider);
 
         // Branch on the real write result (mirrors the STT-key pattern at
         // sttKeyPersistenceWarning). Without this, a disk-full/EACCES on the
         // provider-save would silently leave the user on the previous provider
         // after restart — same false-Saved bug class f2dc18c closed for keys.
         if (!persisted) {
-          CredentialsManager.getInstance().emitStorageStatusDiagnostic('stt_save_failed');
+          credentialsManager.emitStorageStatusDiagnostic('stt_save_failed');
           return { success: false, error: sttPersistError };
         }
 
@@ -7667,6 +7666,20 @@ export function initializeIpcHandlers(appState: AppState): void {
         return { success: true };
       } catch (error: any) {
         console.error('Error setting STT provider:', error);
+        if (credentialsManager.getSttProvider() !== previousProvider) {
+          const rolledBack = credentialsManager.setSttProvider(previousProvider);
+          if (!rolledBack) {
+            credentialsManager.emitStorageStatusDiagnostic('stt_save_failed');
+          }
+          try {
+            await appState.reconfigureSttProvider();
+          } catch (rollbackError) {
+            console.error('Error restoring previous STT provider:', rollbackError);
+          }
+          BrowserWindow.getAllWindows().forEach((win) => {
+            if (!win.isDestroyed()) win.webContents.send('credentials-changed');
+          });
+        }
         return { success: false, error: error.message };
       }
     },
@@ -7939,6 +7952,18 @@ export function initializeIpcHandlers(appState: AppState): void {
   // renderer state, so the masked-key regression cannot recur.
   const { USE_STORED_KEY_SENTINEL, resolveSttTestKey } = require('./services/CredentialsManager');
   const { isValidSttRegion } = require('./utils/curlUtils');
+
+  safeHandle('test-local-funasr-connection', async () => {
+    try {
+      const health = await localFunAsrServiceManager.ensureReady();
+      return { success: true, health };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
 
   safeHandle(
     'test-stt-connection',
@@ -8953,17 +8978,14 @@ export function initializeIpcHandlers(appState: AppState): void {
     if (typeof question !== 'string' || !question.trim()) return { success: false, error: 'Question is empty' };
     const normalizedQuestion = question.trim().slice(0, 1200);
     try {
-      // Knowledge base direction comes from persisted settings (userData),
-      // not from a file inside the read-only packaged knowledge_source.
-      const direction = SettingsManager.getInstance().getInterviewKbDirection();
       const rootCandidates = [
-        path.join(app.getAppPath(), 'knowledge_source'),
+        path.join(app.getPath('userData'), 'knowledge_source'),
         path.join(process.cwd(), 'knowledge_source'),
       ];
-      const resolved = resolveKbFilePath(rootCandidates, direction, (candidate) => fs.existsSync(candidate));
+      const resolved = resolveKbFilePath(rootCandidates, (candidate) => fs.existsSync(candidate));
       if ('error' in resolved) return { success: false, error: resolved.error };
       const { context, matches } = getInterviewKbRetriever().retrieve(normalizedQuestion, resolved.kbPath);
-      console.log(`[interview:retrieve-knowledge] direction=${direction} kb=${resolved.kbPath} hits=${matches.length}`);
+      console.log(`[interview:retrieve-knowledge] kb=${resolved.kbPath} hits=${matches.length}`);
       return {
         success: true,
         context,

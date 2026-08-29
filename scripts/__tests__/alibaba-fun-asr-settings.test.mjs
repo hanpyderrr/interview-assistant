@@ -132,10 +132,13 @@ test('Alibaba operations hold a synchronous lock across save IPCs', () => {
     /const handleSttProviderChange = async \([^)]*\) => \{([\s\S]*?)\n\s*\};/,
   );
   assert.ok(providerHandler, 'handleSttProviderChange should exist');
-  assert.match(
-    providerHandler[1],
-    /^\s*if \(alibabaSaveInFlightRef\.current\) return;\s*setSttSaved\(false\);/,
-  );
+  const providerBody = providerHandler[1];
+  const providerGuardIndex = providerBody.indexOf('if (alibabaSaveInFlightRef.current) return;');
+  const providerSavedIndex = providerBody.indexOf('setSttSaved(false);');
+  const providerFirstIpcIndex = providerBody.indexOf('window.electronAPI');
+  assert.ok(providerGuardIndex >= 0, 'provider change checks the synchronous save lock');
+  assert.ok(providerSavedIndex > providerGuardIndex, 'provider state changes only after the lock guard');
+  assert.ok(providerFirstIpcIndex > providerGuardIndex, 'provider lock guard runs before its first IPC');
 
   const testHandler = source.match(
     /const handleTestSttConnection = async \(\) => \{([\s\S]*?)\n\s*\};/,

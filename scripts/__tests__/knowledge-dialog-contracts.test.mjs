@@ -10,7 +10,7 @@ import {
   parseDialogMessage,
 } from '../knowledge-dialog/contracts.mjs';
 
-// The personal knowledge base (knowledge_source/embedded_kb.jsonl) is
+// The personal knowledge base (knowledge_source/interview_kb.jsonl) is
 // user-local and out of scope: every assertion here uses the fictional
 // fixtures under validation/knowledge-dialog/fixtures/ or inline messages.
 

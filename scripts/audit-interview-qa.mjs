@@ -7,7 +7,7 @@ import process from 'node:process';
 const SCRIPT_DIR = path.dirname(path.resolve(process.argv[1] ?? new URL(import.meta.url).pathname));
 const PROJECT_ROOT = path.resolve(SCRIPT_DIR, '..');
 const SOURCE = path.resolve(PROJECT_ROOT, '..', '..', '企业求职准备', '个人求职与学习资料', '简历与个人档案', '嵌入式软件工程师技术面试准备', '嵌入式软件工程师问题答案.md');
-const KB = path.resolve(PROJECT_ROOT, 'knowledge_source', 'embedded_kb.jsonl');
+const KB = path.resolve(PROJECT_ROOT, 'knowledge_source', 'interview_kb.jsonl');
 const REPORT = path.resolve(PROJECT_ROOT, 'knowledge_source', 'interview_qa_preflight.md');
 
 const TERM_LIST = [

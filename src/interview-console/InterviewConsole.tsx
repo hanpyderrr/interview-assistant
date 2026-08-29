@@ -17,6 +17,7 @@ import { recordRoundEvent, resetRoundEvents, recordTranscriptDiagnostics, record
 import { createQuestionRoundCoordinator, type RoundAction } from './questionRoundCoordinator'
 import { INTERVIEW_FONT_DEFAULTS, INTERVIEW_FONT_MAX, INTERVIEW_FONT_MIN, adjustInterviewFontSize, loadInterviewFontSizes, saveInterviewFontSizes, type InterviewFontSizes } from './interviewFontSettings'
 import { loadCandidateContextEnabled, saveCandidateContextEnabled } from './candidateContextSettings'
+import { INTERVIEW_ANSWER_LEVEL_OPTIONS, loadInterviewAnswerLevel, saveInterviewAnswerLevel, type InterviewAnswerLevel } from './interviewAnswerLevel'
 import { createCandidateSpeechCleanupCoordinator, type CandidateCleanupStatus, type CandidateSpeechCleanupCoordinator } from './candidateSpeechCleanup'
 import { createInterviewerDisplayCorrectionCoordinator, type InterviewerDisplayCorrectionCoordinator } from './interviewerDisplayCorrection'
 import { createQuestionCorrectionExtractor, flushResolvedCorrectionExtractor, stripCorrectionSection, type CorrectionExtractor } from './questionCorrectionExtractor'
@@ -30,7 +31,7 @@ const formatTime = (seconds: number) => `${Math.floor(seconds / 60).toString().p
 
 type Hit = InterviewAnswerHit
 type InterviewConsoleProps = { onOpenSettings: (tab: string) => void }
-type AnswerJob = { id: number; question: string; analysisQuestion: string; conversationContext: string; generation: number; roundId: number; attemptId: number; roundSessionGeneration: number }
+type AnswerJob = { id: number; question: string; analysisQuestion: string; conversationContext: string; answerLevel: InterviewAnswerLevel; generation: number; roundId: number; attemptId: number; roundSessionGeneration: number }
 type ActiveAnswer = AnswerJob & { streamId?: number; settled: boolean; stale: boolean }
 type CandidateStream = { generationId: number; question: string; streamId?: number; settled: boolean }
 type LatencyTrace = ReturnType<typeof createLatencyTrace>
@@ -103,6 +104,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
   const [candidateText, setCandidateText] = useState('')
   const [fontSizes, setFontSizes] = useState<InterviewFontSizes>(() => loadInterviewFontSizes())
   const [candidateContextEnabled, setCandidateContextEnabled] = useState(() => loadCandidateContextEnabled())
+  const [answerLevel, setAnswerLevel] = useState<InterviewAnswerLevel>(() => loadInterviewAnswerLevel())
   const [candidateCleanupStatus, setCandidateCleanupStatus] = useState<CandidateCleanupStatus>('idle')
   const [followLatestTranscript, setFollowLatestTranscript] = useState(true)
   const consoleDragHandleRef = useRef<HTMLDivElement | null>(null)
@@ -114,6 +116,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
   const committedCandidateRef = useRef<InterviewTurn[]>([])
   const conversationTurnsRef = useRef<InterviewTurn[]>([])
   const candidateContextEnabledRef = useRef(candidateContextEnabled)
+  const answerLevelRef = useRef(answerLevel)
   const interviewerDisplayCorrectionRef = useRef<InterviewerDisplayCorrectionCoordinator | null>(null)
   if (!interviewerDisplayCorrectionRef.current) {
     interviewerDisplayCorrectionRef.current = createInterviewerDisplayCorrectionCoordinator({
@@ -176,7 +179,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
   const partialPrewarmRef = useRef(createPartialPrewarmGate({
     onStable: ({ question, segmentId }) => {
       if (!sessionActiveRef.current) return
-      void answerPrewarmRef.current.prewarm(question, getConversationContext())
+      void answerPrewarmRef.current.prewarm(question, getConversationContext(), answerLevelRef.current)
         .then((prewarmed) => startCandidateStream(question, prewarmed, segmentId))
         .catch(() => {})
     },
@@ -201,6 +204,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
   const isLive = sessionActive
   const waveform = useMemo(() => Array.from({ length: 32 }, (_, index) => 18 + ((index * 17) % 43)), [])
   const selectedAnswer = getSelectedAnswer(answerState)
+  const selectedAnswerLevel = INTERVIEW_ANSWER_LEVEL_OPTIONS.find((option) => option.value === answerLevel)
 
   function publishLatencyTrace(trace: LatencyTrace): void {
     const target = window as InterviewLatencyWindow
@@ -315,6 +319,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
       question,
       analysisQuestion: normalizeInterviewQuestion(question),
       conversationContext,
+      answerLevel: answerLevelRef.current,
       generation: sessionGenerationRef.current,
       roundId: action.roundId,
       attemptId: action.attemptId,
@@ -330,7 +335,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
     lastAnsweredQuestionRef.current = roundCoordinatorRef.current.getSnapshot().turns.slice(-1)[0] as InterviewTurn
       ?? lastAnsweredQuestionRef.current
     setConfirmedQuestion(question)
-    void answerPrewarmRef.current.prewarm(job.analysisQuestion, conversationContext).catch(() => {})
+    void answerPrewarmRef.current.prewarm(job.analysisQuestion, conversationContext, job.answerLevel).catch(() => {})
     if (action.reason === 'provisional') {
       enqueueAnswer(action.answerId, question, job)
       return
@@ -416,6 +421,15 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
     else candidateCleanupRef.current?.cancel()
   }
 
+  function handleAnswerLevelChange(level: InterviewAnswerLevel): void {
+    answerLevelRef.current = level
+    setAnswerLevel(level)
+    saveInterviewAnswerLevel(level)
+    answerPrewarmRef.current.clear()
+    partialPrewarmRef.current.clear()
+    cancelCandidateStream()
+  }
+
   async function startCandidateStream(question: string, prewarmed: { retrieval: { success: boolean; context?: string }; context: string; prompt?: string }, segmentId?: number): Promise<void> {
     const api = window.electronAPI
     if (!api?.streamGeminiChat || !prewarmed.retrieval.success || !prewarmed.prompt || !sessionActiveRef.current) return
@@ -479,7 +493,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
   }
 
   function enqueueAnswer(id: number, question: string, job: AnswerJob, select = true): number {
-    dispatchAnswer({ type: 'enqueue', id, question, select })
+    dispatchAnswer({ type: 'enqueue', id, question, select, answerLevel: job.answerLevel })
     answerQueueRef.current.push(job)
     recordRoundEvent({ type: 'answer-lifecycle', stage: 'enqueue', answerId: id, textLength: question.length })
     setError('')
@@ -515,7 +529,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
     try {
       let prewarmed = null
       try {
-        prewarmed = await answerPrewarmRef.current.consume(job.analysisQuestion, job.conversationContext)
+        prewarmed = await answerPrewarmRef.current.consume(job.analysisQuestion, job.conversationContext, job.answerLevel)
       } catch {
         // Question text or conversation context changed after prewarm.
       }
@@ -533,7 +547,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
       }
       const context = retrieval?.context || '暂无题库命中。请只使用已确认的个人经历，未知数据标记为待补充。'
       if (retrieval?.matches) dispatchAnswer({ type: 'hits', id: job.id, hits: retrieval.matches as Hit[] })
-      const prompt = prewarmed?.prompt || buildInterviewConsolePrompt(job.analysisQuestion, context, job.conversationContext)
+      const prompt = prewarmed?.prompt || buildInterviewConsolePrompt(job.analysisQuestion, context, job.conversationContext, job.answerLevel)
       providerDeadlineControllerRef.current.start(active.id)
       if ((window as InterviewLatencyWindow).__nativelyInjectInterviewProviderTimeout) {
         latencyTrace?.mark('providerDeadline')
@@ -715,7 +729,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
           applyRoundActions(actions)
           const snapshot = roundCoordinatorRef.current.getSnapshot()
           if (snapshot.roundOpen && snapshot.pendingQuestion.trim()) {
-            void answerPrewarmRef.current.prewarm(normalizeInterviewQuestion(snapshot.pendingQuestion), getConversationContext()).catch(() => {})
+            void answerPrewarmRef.current.prewarm(normalizeInterviewQuestion(snapshot.pendingQuestion), getConversationContext(), answerLevelRef.current).catch(() => {})
           }
           if (roundTickRef.current !== null) window.clearTimeout(roundTickRef.current)
           if (snapshot.roundOpen && snapshot.status === 'idle' && snapshot.pendingQuestion.trim()) {
@@ -1099,7 +1113,7 @@ export default function InterviewConsole({ onOpenSettings }: InterviewConsolePro
 
   return <main className="interview-console" style={consoleStyle}>
     <header className="console-topbar drag-region select-none"><div className="brand-lockup"><div className="brand-orbit"><Sparkles size={16} /></div><div><p className="eyebrow">NATIVELY / INTERVIEW LAB</p><h1>面试控制台</h1></div></div><div ref={consoleDragHandleRef} className="console-drag-handle" aria-hidden="true" /><div className="session-meta"><span className={`status-dot status-${status}`} /><span>{STATUS_COPY[status]}</span><span className="meta-divider" /><Timer size={15} /><strong>{formatTime(elapsed)}</strong></div><div className="topbar-actions no-drag"><div className="font-size-controls no-drag"><div className="font-size-control"><button type="button" aria-label="缩小问题字体" title="缩小问题字体" disabled={fontSizes.question <= INTERVIEW_FONT_MIN} onClick={() => changeInterviewFontSize('question', -1)}>−</button><span role="button" tabIndex={0} title="双击恢复问题默认字号" onDoubleClick={() => resetInterviewFontSize('question')} onKeyDown={(event) => handleFontResetKeyDown(event, 'question')}>问题 {fontSizes.question}px</span><button type="button" aria-label="放大问题字体" title="放大问题字体" disabled={fontSizes.question >= INTERVIEW_FONT_MAX} onClick={() => changeInterviewFontSize('question', 1)}>+</button></div><div className="font-size-control"><button type="button" aria-label="缩小答案字体" title="缩小答案字体" disabled={fontSizes.answer <= INTERVIEW_FONT_MIN} onClick={() => changeInterviewFontSize('answer', -1)}>−</button><span role="button" tabIndex={0} title="双击恢复答案默认字号" onDoubleClick={() => resetInterviewFontSize('answer')} onKeyDown={(event) => handleFontResetKeyDown(event, 'answer')}>答案 {fontSizes.answer}px</span><button type="button" aria-label="放大答案字体" title="放大答案字体" disabled={fontSizes.answer >= INTERVIEW_FONT_MAX} onClick={() => changeInterviewFontSize('answer', 1)}>+</button></div></div><button className="icon-button" aria-label="打开设置" title="打开设置" onClick={() => onOpenSettings('audio')}><Settings size={17} /></button><button className="icon-button" aria-label="重置会话" onClick={() => { void resetSession() }}><RotateCcw size={17} /></button><WindowControls /></div></header>
-    <section className="console-grid"><aside className="control-rail"><div className="panel-heading"><span>01</span><h2>会话控制</h2></div><div className="control-stack"><label className="field-label">音频源</label><div className="segmented-control"><button className={source === 'microphone' ? 'selected' : ''} onClick={() => setSource('microphone')}><Mic size={15} /> 麦克风</button><button className={source === 'system' ? 'selected' : ''} onClick={() => setSource('system')}><Headphones size={15} /> 系统回采</button></div><label className="field-label" htmlFor="device">设备</label><div className="select-wrap"><select id="device" value={device} onChange={(event) => setDevice(event.target.value)}><option>扬声器 (Realtek High Definition Audio)</option><option>耳机 (AirPods Max)</option></select><ChevronDown size={15} /></div><label className="field-label" htmlFor="chunk">音频块</label><div className="select-wrap"><select id="chunk" value={chunkDuration} onChange={(event) => setChunkDuration(event.target.value)}><option>0.5 秒</option><option>1 秒</option><option>2 秒</option></select><ChevronDown size={15} /></div><label className="candidate-context-toggle"><input type="checkbox" checked={candidateContextEnabled} onChange={(event) => handleCandidateContextChange(event.target.checked)} /><span className="candidate-context-switch" aria-hidden="true" /><span><strong>我的发言供 AI 参考</strong><small>开启后发言片段会调用当前 AI 服务整理；关闭后仍会转写和记录</small>{candidateContextEnabled && candidateCleanupStatus !== 'idle' && <em className={`candidate-cleanup-status status-${candidateCleanupStatus}`}>{candidateCleanupStatus === 'cleaning' ? 'AI 整理中' : candidateCleanupStatus === 'cleaned' ? 'AI 已整理' : 'AI 使用原文'}</em>}</span></label></div><div className="rail-divider" /><div className="signal-card"><div className="signal-header"><span>输入信号</span><span className={isLive ? 'signal-live' : ''}>{isLive ? 'LIVE' : 'IDLE'}</span></div><div className="mini-wave">{waveform.slice(0, 18).map((height, index) => <i key={index} style={{ height: `${isLive ? height : 8}px` }} />)}</div><p>{isLive ? '正在监听音频并转写' : '开始后显示实时音频活动'}</p></div><div className="rail-actions">{isLive ? <button className="stop-button" onClick={stopSession}><CircleStop size={17} /> 停止采集</button> : <button className="primary-button" onClick={startSession}><Play size={17} fill="currentColor" /> 开始面试</button>}{demoEnabled && <button className="demo-button" onClick={loadDemo}>加载演示问题</button>}</div>{error && <p className="rail-error">{error}</p>}<p className="rail-note">Electron 使用原生音频会话；浏览器模式只用于界面预览。</p></aside>
+    <section className="console-grid"><aside className="control-rail"><div className="panel-heading"><span>01</span><h2>会话控制</h2></div><div className="control-stack"><label className="field-label">音频源</label><div className="segmented-control"><button className={source === 'microphone' ? 'selected' : ''} onClick={() => setSource('microphone')}><Mic size={15} /> 麦克风</button><button className={source === 'system' ? 'selected' : ''} onClick={() => setSource('system')}><Headphones size={15} /> 系统回采</button></div><label className="field-label" htmlFor="device">设备</label><div className="select-wrap"><select id="device" value={device} onChange={(event) => setDevice(event.target.value)}><option>扬声器 (Realtek High Definition Audio)</option><option>耳机 (AirPods Max)</option></select><ChevronDown size={15} /></div><label className="field-label" htmlFor="chunk">音频块</label><div className="select-wrap"><select id="chunk" value={chunkDuration} onChange={(event) => setChunkDuration(event.target.value)}><option>0.5 秒</option><option>1 秒</option><option>2 秒</option></select><ChevronDown size={15} /></div><label className="field-label" htmlFor="answer-level">回答级别</label><div className="select-wrap answer-level-select"><select id="answer-level" value={answerLevel} onChange={(event) => handleAnswerLevelChange(event.target.value as InterviewAnswerLevel)}>{INTERVIEW_ANSWER_LEVEL_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><ChevronDown size={15} /></div><p className="answer-level-help">{selectedAnswerLevel?.description} · 切换后下一题生效</p><label className="candidate-context-toggle"><input type="checkbox" checked={candidateContextEnabled} onChange={(event) => handleCandidateContextChange(event.target.checked)} /><span className="candidate-context-switch" aria-hidden="true" /><span><strong>我的发言供 AI 参考</strong><small>开启后发言片段会调用当前 AI 服务整理；关闭后仍会转写和记录</small>{candidateContextEnabled && candidateCleanupStatus !== 'idle' && <em className={`candidate-cleanup-status status-${candidateCleanupStatus}`}>{candidateCleanupStatus === 'cleaning' ? 'AI 整理中' : candidateCleanupStatus === 'cleaned' ? 'AI 已整理' : 'AI 使用原文'}</em>}</span></label></div><div className="rail-divider" /><div className="signal-card"><div className="signal-header"><span>输入信号</span><span className={isLive ? 'signal-live' : ''}>{isLive ? 'LIVE' : 'IDLE'}</span></div><div className="mini-wave">{waveform.slice(0, 18).map((height, index) => <i key={index} style={{ height: `${isLive ? height : 8}px` }} />)}</div><p>{isLive ? '正在监听音频并转写' : '开始后显示实时音频活动'}</p></div><div className="rail-actions">{isLive ? <button className="stop-button" onClick={stopSession}><CircleStop size={17} /> 停止采集</button> : <button className="primary-button" onClick={startSession}><Play size={17} fill="currentColor" /> 开始面试</button>}{demoEnabled && <button className="demo-button" onClick={loadDemo}>加载演示问题</button>}</div>{error && <p className="rail-error">{error}</p>}<p className="rail-note">Electron 使用原生音频会话；浏览器模式只用于界面预览。</p></aside>
       <section className="transcript-panel"><div className="panel-heading"><span>02</span><h2>实时转写</h2><span className="panel-kicker">{isLive ? 'LISTENING' : 'LOCAL BUFFER'}</span></div><div className="waveform large-wave">{waveform.map((height, index) => <i key={index} style={{ height: `${isLive ? height : (index % 4 === 0 ? 22 : 8)}px` }} />)}</div><div className="transcript-scroll-shell"><div ref={transcriptScrollRef} className="transcript-scroll-region" onScroll={handleTranscriptScroll}><div className="transcript-stage">{(interviewerTranscriptWindow.folded || candidateTranscriptWindow.folded) && <div className="transcript-folded-notice">已折叠更早转写，完整内容仍用于上下文和会议记录</div>}<section className="interviewer-transcript" aria-live="polite"><div className="transcript-channel-label"><Radio size={13} />面试官问题</div><div className="live-caption"><span className="caption-marker" />{interviewerTranscriptWindow.text || '等待面试官提问…'}</div>{!interviewerTranscriptWindow.text && <div className="transcript-empty"><Activity size={20} /><p>音频进入后，问题会在这里逐字出现。</p><span>检测到停顿后自动确认问题并生成回答。</span></div>}</section><section className="candidate-transcript" aria-live="polite"><div className="transcript-channel-label"><Mic size={13} />我的回答</div><p>{candidateTranscriptWindow.text || '等待你的回答…'}</p></section></div></div>{!followLatestTranscript && <button type="button" className="transcript-return-latest no-drag" aria-label="回到最新转写" onClick={scrollTranscriptToLatest}>回到最新</button>}</div>{confirmedQuestion && <div className="confirmed-question" aria-label="当前已确认问题"><div className="confirmed-label"><Radio size={13} /> 已确认问题</div><p>{confirmedQuestion}</p></div>}<div className="transcript-footer"><span><span className="tiny-led" />中文 / Whisper</span><span>{showDemo ? '演示数据已加载' : '原生音频通道'}</span></div></section>
       <aside className="answer-panel"><div className="panel-heading"><span>03</span><h2>回答建议</h2><span className="answer-badge">AI READY</span></div><AnswerPanel demo={showDemo} question={selectedAnswer?.question || ''} answer={selectedAnswer?.answer || ''} candidateText={candidateText} hits={selectedAnswer?.hits || []} history={answerState.items} selectedId={answerState.selectedId} answerStatus={selectedAnswer?.status || null} onSelectAnswer={(id) => dispatchAnswer({ type: 'select', id })} onLoadDemo={loadDemo} /></aside>
     </section><footer className="console-footer"><span>LOCAL SESSION / NO CREDENTIALS STORED</span><span>Interview Assistant · v0.1</span></footer>

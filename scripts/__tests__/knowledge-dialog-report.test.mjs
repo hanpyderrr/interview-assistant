@@ -69,7 +69,7 @@ test('blocks only high and critical deterministic issues', () => {
 
 test('assigns unique issue and suggestion ids across all fixture rounds', async () => {
   const options = parseCliArgs([
-    '--kb', 'knowledge_source/embedded_kb.example.jsonl',
+    '--kb', 'knowledge_source/interview_kb.example.jsonl',
     '--fixtures', 'validation/knowledge-dialog/fixtures/dialog-cases.jsonl',
     '--max-questions', '10',
   ]);
@@ -86,7 +86,7 @@ test('live validation wires model evaluation and respects the follow-up cap', as
   let evaluatorCalls = 0;
   const options = parseCliArgs([
     '--live',
-    '--kb', 'knowledge_source/embedded_kb.example.jsonl',
+    '--kb', 'knowledge_source/interview_kb.example.jsonl',
     '--fixtures', 'validation/knowledge-dialog/fixtures/dialog-cases.jsonl',
     '--max-questions', '1',
     '--max-followups', '1',

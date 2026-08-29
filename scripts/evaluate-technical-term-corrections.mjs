@@ -52,7 +52,7 @@ function parseArgs(argv) {
 async function main(argv) {
   const options = parseArgs(argv);
   const fixtures = JSON.parse(await fs.readFile(options.fixtures, 'utf8'));
-  const entries = await loadKnowledgeBase(path.resolve('knowledge_source/embedded_kb.jsonl'));
+  const entries = await loadKnowledgeBase(path.resolve('knowledge_source/interview_kb.jsonl'));
   const result = evaluateTechnicalTermFixtures(fixtures, entries);
   await fs.mkdir(path.dirname(options.output), { recursive: true });
   await fs.writeFile(options.output, `${JSON.stringify(result, null, 2)}\n`, 'utf8');

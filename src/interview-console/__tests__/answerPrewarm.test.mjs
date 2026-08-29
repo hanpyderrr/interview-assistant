@@ -59,3 +59,36 @@ test('raw SBI prewarm is consumed by its normalized SPI analysis question', asyn
   assert.strictEqual(await consumed, await prewarmed);
   assert.match((await consumed).context, /SPI/);
 });
+
+test('answer level is part of the prewarm cache identity and prompt', async () => {
+  const cache = createAnswerPrewarmCache(async (question) => ({
+    success: true,
+    context: `context:${question}`,
+    matches: [],
+  }));
+
+  const student = cache.prewarm('什么是 RAG？', 'context', 'student');
+  const sameStudent = cache.prewarm('什么是 RAG？', 'context', 'student');
+  assert.strictEqual(student, sameStudent);
+
+  const senior = cache.prewarm('什么是 RAG？', 'context', 'senior');
+  assert.notStrictEqual(student, senior);
+  await assert.rejects(cache.consume('什么是 RAG？', 'context', 'student'), /no prewarm/i);
+  const consumedSenior = await cache.consume('什么是 RAG？', 'context', 'senior');
+  await assert.rejects(student, /prewarm superseded/i);
+  assert.match(consumedSenior.prompt, /高级工程师/);
+});
+
+test('clear invalidates an in-flight prewarm before it can revive an old answer level', async () => {
+  let releaseRetrieval;
+  const cache = createAnswerPrewarmCache(() => new Promise((resolve) => {
+    releaseRetrieval = resolve;
+  }));
+
+  const staleStudent = cache.prewarm('如何设计 RAG？', 'context', 'student');
+  cache.clear();
+  releaseRetrieval({ success: true, context: 'old student context', matches: [] });
+
+  await assert.rejects(staleStudent, /prewarm superseded/i);
+  await assert.rejects(cache.consume('如何设计 RAG？', 'context', 'student'), /no prewarm/i);
+});

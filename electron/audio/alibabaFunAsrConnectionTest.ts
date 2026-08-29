@@ -165,6 +165,10 @@ export function testAlibabaFunAsrConnection(
             }
             if (parsed.event.taskId !== taskId) return;
             if (parsed.event.type === 'task-failed') {
+                if (stage === 'finish' && parsed.event.errorCode === 'EmptyAudio') {
+                    done({ success: true });
+                    return;
+                }
                 done({ success: false, error: 'Alibaba task failed' });
                 return;
             }

@@ -41,3 +41,25 @@ test('owns the spoken length contract without a blanket 30-60 second rule', () =
   assert.match(prompt, /代码[^\n]*调试[^\n]*(?:DSA|数据结构)[^\n]*系统设计[^\n]*保持完整/);
   assert.doesNotMatch(prompt, /30\s*[-～]\s*60\s*秒/);
 });
+
+test('defaults to the student answer level', () => {
+  const prompt = buildInterviewConsolePrompt('什么是 RAG？', '资料');
+  assert.match(prompt, /回答定位：学生\/应届/);
+  assert.match(prompt, /如果落地我会/);
+  assert.match(prompt, /不得虚构经历、职责或指标/);
+});
+
+test('adds distinct mid and senior depth without removing shared safety contracts', () => {
+  const mid = buildInterviewConsolePrompt('什么是 RAG？', '资料', undefined, 'mid');
+  const senior = buildInterviewConsolePrompt('什么是 RAG？', '资料', undefined, 'senior');
+
+  assert.match(mid, /回答定位：中级工程师/);
+  assert.match(mid, /实现步骤|常见故障|主要取舍/);
+  assert.match(senior, /回答定位：高级工程师/);
+  assert.match(senior, /SLO|容量|降级/);
+  for (const prompt of [mid, senior]) {
+    assert.match(prompt, /【问题修正】/);
+    assert.match(prompt, /没有资料支持的指标写“需要本人补充”/);
+    assert.match(prompt, /不得虚构经历、职责或指标/);
+  }
+});

@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { loadKnowledgeBase, searchKnowledgeBase, buildAnswerContext } from './interview-retriever.mjs';
 import { buildInterviewPrompt } from './build-interview-prompt.mjs';
 
-const DEFAULT_KB = path.resolve('knowledge_source/embedded_kb.jsonl');
+const DEFAULT_KB = path.resolve('knowledge_source/interview_kb.jsonl');
 
 export async function prepareInterviewRequest(question, { kbPath = DEFAULT_KB, topK = 5, maxChars = 6000 } = {}) {
   const entries = await loadKnowledgeBase(kbPath);

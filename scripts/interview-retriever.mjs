@@ -5,14 +5,11 @@ import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 
-function normalize(value) {
-  return String(value ?? '').toLowerCase().replace(/\s+/g, '');
-}
-
 function terms(value) {
-  const normalized = normalize(value);
-  const latin = normalized.match(/[a-z0-9_+#.-]{2,}/g) ?? [];
-  const chinese = [...normalized.matchAll(/[\u4e00-\u9fff]{2,}/g)].flatMap((match) => {
+  const lowered = String(value ?? '').toLowerCase();
+  const latin = lowered.match(/[a-z0-9_+#.-]{2,}/g) ?? [];
+  const chineseText = lowered.replace(/\s+/g, '');
+  const chinese = [...chineseText.matchAll(/[\u4e00-\u9fff]{2,}/g)].flatMap((match) => {
     const text = match[0];
     return Array.from({ length: Math.max(0, text.length - 1) }, (_, index) => text.slice(index, index + 2));
   });
@@ -20,9 +17,12 @@ function terms(value) {
 }
 
 const PROJECT_PATTERNS = {
-  tof: /单光子|\btof\b|tcspc|pf32|getnextframes|intel\s*n97/i,
-  temperature: /冰体|109\s*(?:个|路|点)|stm32f767|\bf767\b|onenet|多点温度/i,
-  wing: /机翼结冰|ad5940|冰风洞|fl-?61|运-?12/i,
+  tof: /单光子|\btof\b|tofframe|tcspc|pf32|getnextframes|intel\s*n97/i,
+  ice_temperature: /ice_temperature|冰体|109\s*(?:个|路|点)|stm32f767|\bf767\b|onenet|多点温度/i,
+  wing_icing: /wing_icing|机翼结冰|ad5940|冰风洞|fl-?61|运-?12/i,
+  plankiller: /plankiller|执行力管理|计划管理|习惯复盘/i,
+  career_evidence_lab: /career_evidence_lab|career\s*evidence\s*lab|求证面试|证据驱动的求职/i,
+  genealogy_agent: /genealogy_agent|族谱|世系|paddleocr/i,
 };
 
 function projectTags(value) {
@@ -35,12 +35,15 @@ function projectTags(value) {
 function projectScore(question, entry) {
   const queryProjects = projectTags(question);
   if (queryProjects.size === 0) return 0;
-  const entryProjects = projectTags([
+  const entryProjects = new Set([
+    ...(entry.project_ids ?? []),
+    ...projectTags([
     entry.title,
     entry.category,
     ...(entry.keywords ?? []),
     entry.content,
-  ].join(' '));
+    ].join(' ')),
+  ]);
   if ([...queryProjects].some((project) => entryProjects.has(project))) return 40;
   return entryProjects.size > 0 ? -20 : 0;
 }
@@ -98,7 +101,7 @@ export function buildAnswerContext(question, entries, { topK = 5, maxChars = 600
     '检索资料：',
     ...results.map(({ entry, score }) => [
       `- [${entry.id}] 来源等级=${entry.fact_status}，相关度=${score.toFixed(2)}，主题=${entry.title}`,
-      `  内容：${entry.content}${entry.fact_status === 'prepared_answer' && entry.personal_claim ? '（此内容含个人主张，必须与简历事实核验）' : ''}`,
+      `  内容：${entry.content}${entry.fact_status === 'prepared_answer' && entry.personal_claim ? '（此内容含个人主张，必须与简历事实核验）' : ''}${entry.evidence_status === 'planned' ? '（规划能力，不得表述为已实现。）' : ''}${entry.evidence_status === 'in_progress' ? '（开发在研，需说明当前完成阶段。）' : ''}`,
       `  来源：${(entry.source_paths ?? ['未记录来源']).join('；')}`,
     ].join('\n')),
   ];
@@ -112,7 +115,7 @@ async function main(argv) {
     console.log('Usage: node scripts/interview-retriever.mjs "面试问题" [knowledge.jsonl]');
     return;
   }
-  const kbPath = argv[1] ?? path.resolve('knowledge_source/embedded_kb.jsonl');
+  const kbPath = argv[1] ?? path.resolve('knowledge_source/interview_kb.jsonl');
   const entries = await loadKnowledgeBase(kbPath);
   console.log(buildAnswerContext(question, entries));
 }

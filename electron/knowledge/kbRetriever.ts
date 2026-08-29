@@ -24,6 +24,9 @@ export interface KbEntry {
   content: string;
   source_paths?: string[];
   keywords: string[];
+  project_ids?: string[];
+  target_roles?: string[];
+  evidence_status?: 'verified' | 'in_progress' | 'planned' | 'draft' | 'reference';
   [key: string]: unknown;
 }
 
@@ -44,20 +47,16 @@ export interface KbRetrieveResult {
   matches: KbMatch[];
 }
 
-export const VALID_KB_DIRECTIONS = ['ai', 'embedded'] as const;
-export type KbDirection = typeof VALID_KB_DIRECTIONS[number];
-
 /** Pinned by kbRetriever.test.mjs — the renderer relies on this exact fallback
  *  text when nothing matches (do not reword without updating that test). */
 export const NO_MATCH_CONTEXT =
   'No matching resume facts were found. Do not invent personal metrics; mark missing details for the candidate to fill in.';
 
-const normalize = (value: unknown): string => String(value ?? '').toLowerCase().replace(/\s+/g, '');
-
 function terms(value: string): Set<string> {
-  const normalized = normalize(value);
-  const latin = normalized.match(/[a-z0-9_+#.-]{2,}/g) ?? [];
-  const chinese = [...normalized.matchAll(/[一-鿿]{2,}/g)].flatMap((match) => {
+  const lowered = String(value ?? '').toLowerCase();
+  const latin = lowered.match(/[a-z0-9_+#.-]{2,}/g) ?? [];
+  const chineseText = lowered.replace(/\s+/g, '');
+  const chinese = [...chineseText.matchAll(/[一-鿿]{2,}/g)].flatMap((match) => {
     const text = match[0];
     return Array.from({ length: Math.max(0, text.length - 1) }, (_, index) => text.slice(index, index + 2));
   });
@@ -65,9 +64,12 @@ function terms(value: string): Set<string> {
 }
 
 const PROJECT_PATTERNS: Record<string, RegExp> = {
-  tof: /单光子|\btof\b|tcspc|pf32|getnextframes|intel\s*n97/i,
-  temperature: /冰体|109\s*(?:个|路|点)|stm32f767|\bf767\b|onenet|多点温度/i,
-  wing: /机翼结冰|ad5940|冰风洞|fl-?61|运-?12/i,
+  tof: /单光子|\btof\b|tofframe|tcspc|pf32|getnextframes|intel\s*n97/i,
+  ice_temperature: /ice_temperature|冰体|109\s*(?:个|路|点)|stm32f767|\bf767\b|onenet|多点温度/i,
+  wing_icing: /wing_icing|机翼结冰|ad5940|冰风洞|fl-?61|运-?12/i,
+  plankiller: /plankiller|执行力管理|计划管理|习惯复盘/i,
+  career_evidence_lab: /career_evidence_lab|career\s*evidence\s*lab|求证面试|证据驱动的求职/i,
+  genealogy_agent: /genealogy_agent|族谱|世系|paddleocr/i,
 };
 
 function projectTags(value: unknown): Set<string> {
@@ -80,12 +82,15 @@ function projectTags(value: unknown): Set<string> {
 function projectScore(question: string, entry: KbEntry): number {
   const queryProjects = projectTags(question);
   if (queryProjects.size === 0) return 0;
-  const entryProjects = projectTags([
+  const entryProjects = new Set([
+    ...(entry.project_ids ?? []),
+    ...projectTags([
     entry.title,
     entry.category,
     ...(entry.keywords ?? []),
     entry.content,
-  ].join(' '));
+    ].join(' ')),
+  ]);
   if ([...queryProjects].some((project) => entryProjects.has(project))) return 40;
   return entryProjects.size > 0 ? -20 : 0;
 }
@@ -128,9 +133,14 @@ export function buildKbContext(matches: KbMatch[], maxChars = 6000): string {
       entry.fact_status === 'prepared_answer'
         ? '\n（此内容为口述草稿，未经本人逐条确认；涉及个人指标、团队分工、故障根因时以简历事实为准。）'
         : '';
+    const evidenceWarning = entry.evidence_status === 'planned'
+      ? '\n（规划能力：当前只有设计或实施计划，不得表述为已实现、已上线或已验证。）'
+      : entry.evidence_status === 'in_progress'
+        ? '\n（开发在研：回答时必须说明当前完成阶段，不得把最终产品能力写成现有成果。）'
+        : '';
     return [
       `[${entry.id}] ${entry.title ?? ''} (score=${score.toFixed(2)}, source=${entry.fact_status ?? 'unknown'})`,
-      `${entry.content}${claimWarning}`,
+      `${entry.content}${claimWarning}${evidenceWarning}`,
       `来源：${sources}`,
     ].join('\n');
   });
@@ -140,19 +150,14 @@ export function buildKbContext(matches: KbMatch[], maxChars = 6000): string {
 
 // ── pure path resolution ────────────────────────────────────────────────────
 //
-// Candidates are knowledge_source ROOT directories (not files), mirroring the
-// two lookup roots the handler already used: the packaged app path and the
-// development cwd. Fail-closed: an invalid direction or a missing selected
-// KB file is an error — never a silent fallback to the other direction.
+// Candidates are knowledge_source ROOT directories (not files). Runtime puts
+// the private userData root first and the development checkout second.
+// Fail-closed: there is one unified KB and no fallback to legacy direction files.
 
 export function buildKbFileCandidates(
   rootCandidates: string[],
-  direction: unknown,
-): { filePaths: string[]; error?: string } {
-  if (!(VALID_KB_DIRECTIONS as readonly unknown[]).includes(direction)) {
-    return { filePaths: [], error: `Invalid interview knowledge base direction: ${String(direction)}` };
-  }
-  const fileName = `${direction}_kb.jsonl`;
+): { filePaths: string[] } {
+  const fileName = 'interview_kb.jsonl';
   return {
     filePaths: rootCandidates.map((root) => {
       const clean = root.replace(/[\\/]+$/, '');
@@ -163,15 +168,13 @@ export function buildKbFileCandidates(
 
 export function resolveKbFilePath(
   rootCandidates: string[],
-  direction: unknown,
   exists: (filePath: string) => boolean,
 ): { kbPath: string } | { error: string } {
-  const { filePaths, error } = buildKbFileCandidates(rootCandidates, direction);
-  if (error) return { error };
+  const { filePaths } = buildKbFileCandidates(rootCandidates);
   for (const filePath of filePaths) {
     if (exists(filePath)) return { kbPath: filePath };
   }
-  return { error: `${direction} knowledge base is unavailable` };
+  return { error: 'Unified interview knowledge base is unavailable' };
 }
 
 // ── stateful retriever service ──────────────────────────────────────────────

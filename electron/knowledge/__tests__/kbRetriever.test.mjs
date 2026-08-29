@@ -29,6 +29,22 @@ test('scores keywords above title above content with fact_status bonus', () => {
   assert.ok(results[0].score > 5, `keyword hit should dominate, got ${results[0].score}`);
 });
 
+test('keeps separate Latin keywords instead of fusing them during normalization', () => {
+  const entries = [
+    { id: 'spi', title: 'Linux SPI', content: '用户态接口', keywords: ['spidev', 'SPI_IOC_MESSAGE'], fact_status: 'reference' },
+    { id: 'other', title: '其他接口', content: '普通内容', keywords: ['ioctl'], fact_status: 'reference' },
+  ];
+  assert.equal(scoreEntries('spidev 和 SPI_IOC_MESSAGE 有什么区别', entries, 2)[0].entry.id, 'spi');
+});
+
+test('recognizes TofFrame as the TOF project even without a word boundary after TOF', () => {
+  const entries = [
+    { id: 'generic', title: 'CRC 错误', content: '通用 CRC 说明', keywords: ['CRC'], fact_status: 'prepared_answer' },
+    { id: 'tof', title: 'TofFrame 边界', content: 'CRC 不能恢复已丢失数据', keywords: ['TofFrame', 'CRC'], project_ids: ['tof'], fact_status: 'prepared_answer' },
+  ];
+  assert.equal(scoreEntries('TofFrame CRC 能恢复丢失数据吗', entries, 2)[0].entry.id, 'tof');
+});
+
 test('stable tie-break: score desc then id asc', () => {
   const tied = [
     { id: 'z.9', title: 'X', content: 'SPI', keywords: ['X'], fact_status: 'reference' },
@@ -53,11 +69,7 @@ test('bonus-only entries rank below term hits (known reference behavior)', () =>
   const results = scoreEntries('SPI', embeddedFixtures, 5);
   assert.equal(results[0].entry.id, 'a.001');
   assert.ok(results.slice(1).every((r) => r.score < results[0].score));
-  // 3.15 not 5.15: normalize() strips whitespace, so the keyword string
-  // 'SPI CRC32' fuses into 'spicrc32' and 'spi' only matches the title tier.
-  // Verified identical in scripts/interview-retriever.mjs — a shared quirk to
-  // fix in both places as a follow-up, NOT as part of this change.
-  assert.deepEqual(results.map((r) => r.score), [3.15, 0.25, 0.15]);
+  assert.deepEqual(results.map((r) => r.score), [5.15, 0.25, 0.15]);
 });
 
 test('prefers a project-specific boundary answer over a cross-project protocol template', () => {
@@ -113,32 +125,56 @@ test('tolerates missing source_paths', () => {
   assert.ok(context.includes('未记录来源'));
 });
 
+test('warns when a matched project capability is only planned', () => {
+  const entry = [{
+    id: 'career.plan',
+    title: 'Career Evidence Lab 十题面试',
+    content: '设计十题动态面试与有界追问。',
+    keywords: ['十题面试'],
+    fact_status: 'prepared_answer',
+    evidence_status: 'planned',
+  }];
+  const context = buildKbContext(scoreEntries('十题面试', entry, 1));
+  assert.ok(context.includes('规划能力'));
+  assert.ok(context.includes('不得表述为已实现'));
+});
+
+test('uses explicit metadata to keep all six projects separated', () => {
+  const projectIds = ['tof', 'ice_temperature', 'wing_icing', 'plankiller', 'career_evidence_lab', 'genealogy_agent'];
+  for (const projectId of projectIds) {
+    const entries = projectIds.map((id) => ({
+      id,
+      title: '项目边界',
+      content: '说明项目的真实完成范围。',
+      keywords: ['项目边界'],
+      project_ids: [id],
+      fact_status: 'resume_fact',
+    }));
+    const results = scoreEntries(`请说明 ${projectId} 的项目边界`, entries, 6);
+    assert.equal(results[0].entry.id, projectId);
+  }
+});
+
 // ── pure path resolution ────────────────────────────────────────────────────
 
-test('maps direction to <direction>_kb.jsonl across candidate roots', () => {
-  const candidates = buildKbFileCandidates(['/a', '/b'], 'ai');
-  assert.deepEqual(candidates, { filePaths: ['/a/ai_kb.jsonl', '/b/ai_kb.jsonl'] });
-  const normalized = buildKbFileCandidates(['/a/', '/b\\'], 'embedded');
-  assert.deepEqual(normalized, { filePaths: ['/a/embedded_kb.jsonl', '/b/embedded_kb.jsonl'] });
+test('maps every candidate root to the unified interview_kb.jsonl', () => {
+  const candidates = buildKbFileCandidates(['/a', '/b']);
+  assert.deepEqual(candidates, { filePaths: ['/a/interview_kb.jsonl', '/b/interview_kb.jsonl'] });
+  const normalized = buildKbFileCandidates(['/a/', '/b\\']);
+  assert.deepEqual(normalized, { filePaths: ['/a/interview_kb.jsonl', '/b/interview_kb.jsonl'] });
 });
 
 test('picks the first existing root, then the next', () => {
-  const ai = resolveKbFilePath(['/a', '/b'], 'ai', (p) => p === '/b/ai_kb.jsonl');
-  assert.deepEqual(ai, { kbPath: '/b/ai_kb.jsonl' });
-  const emb = resolveKbFilePath(['/a', '/b'], 'embedded', (p) => p === '/a/embedded_kb.jsonl');
-  assert.deepEqual(emb, { kbPath: '/a/embedded_kb.jsonl' });
+  const second = resolveKbFilePath(['/a', '/b'], (p) => p === '/b/interview_kb.jsonl');
+  assert.deepEqual(second, { kbPath: '/b/interview_kb.jsonl' });
+  const first = resolveKbFilePath(['/a', '/b'], (p) => p === '/a/interview_kb.jsonl');
+  assert.deepEqual(first, { kbPath: '/a/interview_kb.jsonl' });
 });
 
-test('rejects invalid direction', () => {
-  const result = resolveKbFilePath(['/a'], 'cooking', () => true);
-  assert.ok('error' in result && result.error.includes('Invalid'));
-});
-
-test('fail-closed: missing selected KB never falls back to the other direction', () => {
-  const result = resolveKbFilePath(['/a'], 'ai', () => false);
+test('fail-closed when the unified knowledge base is missing', () => {
+  const result = resolveKbFilePath(['/a'], () => false);
   assert.ok('error' in result);
-  assert.ok(result.error.includes('ai knowledge base is unavailable'));
-  assert.ok(!result.error.includes('embedded'));
+  assert.equal(result.error, 'Unified interview knowledge base is unavailable');
 });
 
 // ── stateful service ────────────────────────────────────────────────────────
@@ -166,7 +202,7 @@ test('retrieves from a real fixture file', () => {
 });
 
 test('caches external files by mtime+size fingerprint and reloads on change', () => {
-  const kbPath = '/kb/embedded_kb.jsonl';
+  const kbPath = '/kb/interview_kb.jsonl';
   const files = {
     [kbPath]: {
       content: JSON.stringify({ id: 'v1', title: 'V1', content: 'SPI 内容', keywords: ['SPI'] }) + '\n',
@@ -181,7 +217,7 @@ test('caches external files by mtime+size fingerprint and reloads on change', ()
 });
 
 test('caches asar files for process lifetime regardless of stat', () => {
-  const kbPath = '/pkg/resources/app.asar/knowledge_source/ai_kb.jsonl';
+  const kbPath = '/pkg/resources/app.asar/knowledge_source/interview_kb.jsonl';
   const files = {
     [kbPath]: {
       content: JSON.stringify({ id: 'v1', title: 'V1', content: 'RAG 内容', keywords: ['RAG'] }) + '\n',

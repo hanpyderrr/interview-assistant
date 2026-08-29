@@ -1,48 +1,50 @@
-# 面试知识库配置
+# 统一面试知识库
 
-仓库不包含作者的个人简历、题库或面试答案。首次使用时，请在本目录自行创建：
+应用只读取一个私人知识库：
 
 ```text
-knowledge_source/embedded_kb.jsonl
+interview_kb.jsonl
 ```
 
-可以复制 `embedded_kb.example.jsonl` 作为起点。该文件采用 JSONL 格式，每行必须是一个独立 JSON 对象，支持以下字段：
+它同时服务 AI Agent 与嵌入式 Linux 面试，不再使用 `ai_kb.jsonl`、`embedded_kb.jsonl` 或方向设置。真实知识库不进入 Git，也不会打进安装包；仓库只保留虚构的 `interview_kb.example.jsonl`。
 
-- `id`：全库唯一标识。
-- `title`：条目标题。
-- `category`：分类，例如 `embedded`、`linux`、`cpp`。
-- `fact_status`：建议使用 `prepared_answer`；只有来自本人简历且确认真实的内容才使用 `resume_fact`。
-- `content`：用于检索和生成答案的正文。
-- `source_paths`：来源说明数组，不要填写密码、Cookie、Token 或私钥路径。
-- `keywords`：技术术语和常见问法数组。
-- `review_status`（扩展字段，可选）：`none` | `codex_draft` | `cc_pending` | `confirmed`，表示该条目的审核状态；当前主要标记 `cc_pending`（CC 审核阻塞，内容为初稿）。
+## 运行时地址
 
-示例：
+应用按顺序查找：
 
-```json
-{"id":"qa.example.spi","title":"SPI 驱动设计","category":"embedded","fact_status":"prepared_answer","review_status":"cc_pending","content":"在这里填写经过确认的面试回答。","source_paths":["user-provided"],"keywords":["SPI","驱动","DMA"]}
-```
+1. `<Electron userData>/knowledge_source/interview_kb.jsonl`；
+2. 开发仓库的 `knowledge_source/interview_kb.jsonl`。
 
-## 知识库方向（2026-08-13）
+第一个路径适合已安装应用，第二个路径适合本仓库开发运行。两处都不存在时，检索会明确返回“统一知识库不可用”，不会回退到旧分库。
 
-- 现阶段只使用 `embedded_kb.jsonl`（嵌入式方向）。
-- 方向由设置 `interviewKbDirection`（`userData/settings.json`）决定：`embedded`（默认）或 `ai`。选择的方向对应的 KB 文件缺失时检索报错（fail-closed），不会回退到另一方向。
-- `ai_kb.jsonl` 暂不提供；AI 方向内容保留在仓库外的私人知识源中，以后再按相同契约导出。
-- 检索运行时带进程级缓存：开发目录文件按 mtime+size 失效，打包（ASAR）内文件按进程生命周期缓存。
+## 字段
 
-## 导出管道
+每行是一个 UTF-8 JSON 对象，至少包含 `id`、`content` 和 `keywords`。推荐字段：
 
-`embedded_kb.jsonl` 由主仓导出脚本生成（不手工编辑）：
+- `title`、`category`、`fact_status`、`review_status`；
+- `source_paths`：来源说明，不能包含密码、Token 或凭据路径；
+- `project_ids`：`tof`、`ice_temperature`、`wing_icing`、`plankiller`、`career_evidence_lab`、`genealogy_agent`；
+- `target_roles`：`ai_agent`、`embedded_linux`；
+- `evidence_status`：`verified`、`in_progress`、`planned`、`draft`、`reference`。
+
+`planned` 与 `in_progress` 会在检索上下文中自动附加边界提示，避免把最终产品规划说成已实现成果。
+
+## 生成
+
+统一知识库由私人知识源生成，不手工维护 JSONL：
 
 ```powershell
-python <private-kb-root>\tools\export_kb.py
+cd <private-knowledge-base-root>
+python tools\build_unified_kb.py
+python tools\export_kb.py --manifest kb_manifest_unified.json
+python tools\export_kb.py --manifest kb_manifest_unified.json --export-dir "$env:APPDATA\natively\knowledge_source"
 ```
 
-脚本读私人知识源中的 `kb_manifest.json`，按 `export.directions`（当前 `["embedded"]`）生成 JSONL；覆盖前自动备份到仓库内已忽略的 `backups/`。
+前两条命令更新开发仓库，第三条更新已安装应用。旧文件备份写到私人知识源的 `backups/`。
 
-## 注意事项
+## 检查
 
-1. 一行只能放一个 JSON 对象，文件使用 UTF-8 编码。
-2. 不要提交个人简历、真实公司机密、API Key、Cookie 或其他凭据。
-3. 修改后可运行 `node scripts/interview-retriever.mjs "SPI 驱动如何设计"` 检查检索结果。
-4. 如果缺少 `embedded_kb.jsonl`，应用仍可启动，但面试题库检索会提示知识库不可用。
+```powershell
+node scripts\interview-retriever.mjs "TofFrame 的 CRC 能恢复丢失数据吗"
+node scripts\interview-retriever.mjs "Career Evidence Lab 当前完成了哪些功能"
+```

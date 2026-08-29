@@ -18,7 +18,7 @@ import { runKnowledgeDialog } from './session-runner.mjs';
 import { writeKnowledgeDialogReport } from './report.mjs';
 
 const DEFAULTS = {
-  kb: path.resolve('knowledge_source/embedded_kb.example.jsonl'),
+  kb: path.resolve('knowledge_source/interview_kb.example.jsonl'),
   fixtures: path.resolve('validation/knowledge-dialog/fixtures/dialog-cases.jsonl'),
   output: path.resolve('validation/knowledge-dialog/results'),
   maxQuestions: 5,

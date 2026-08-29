@@ -6,7 +6,7 @@ import process from 'node:process';
 import { auditInterviewQa } from './audit-interview-qa.mjs';
 
 const PROJECT_ROOT = path.resolve(path.dirname(path.resolve(process.argv[1])), '..');
-const KB = path.resolve(PROJECT_ROOT, 'knowledge_source', 'embedded_kb.jsonl');
+const KB = path.resolve(PROJECT_ROOT, 'knowledge_source', 'interview_kb.jsonl');
 
 const GROUP_NAMES = {
   E1: '项目概览与工程取舍',

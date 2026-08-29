@@ -1019,7 +1019,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     } | null>(null);
 
     // STT Provider settings
-    const [sttProvider, setSttProvider] = useState<'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local-whisper' | 'alibaba-fun-asr'>('none');
+    const [sttProvider, setSttProvider] = useState<'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local-whisper' | 'alibaba-fun-asr' | 'local-funasr'>('none');
     const [groqSttModel, setGroqSttModel] = useState('whisper-large-v3-turbo');
     const [sttGroqKey, setSttGroqKey] = useState('');
     const [sttOpenaiKey, setSttOpenaiKey] = useState('');
@@ -1031,6 +1031,15 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     const [sttOpenaiBaseUrl, setSttOpenaiBaseUrl] = useState('');
     const [sttTestStatus, setSttTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [sttTestError, setSttTestError] = useState('');
+    const [localFunAsrHealth, setLocalFunAsrHealth] = useState<{
+        state: 'loading' | 'ready' | 'failed';
+        status: string;
+        detail: string;
+        model_load_seconds?: number | null;
+        warmup_seconds?: number | null;
+        request_count?: number;
+        cuda_memory_current_mib?: number | null;
+    } | null>(null);
     const [sttSaving, setSttSaving] = useState(false);
     const [sttSaved, setSttSaved] = useState(false);
     const [googleServiceAccountPath, setGoogleServiceAccountPath] = useState<string | null>(null);
@@ -1143,19 +1152,36 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
         return () => unsubscribe();
     }, []); // mount-once: isOpen is checked inside the callback
 
-    const handleSttProviderChange = async (provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local-whisper' | 'alibaba-fun-asr') => {
+    const handleSttProviderChange = async (provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local-whisper' | 'alibaba-fun-asr' | 'local-funasr') => {
         if (alibabaSaveInFlightRef.current) return;
+        const previousProvider = sttProvider;
         setSttSaved(false);
         setSttProvider(provider);
         setIsSttDropdownOpen(false);
         setSttTestStatus('idle');
         setSttTestError('');
+        if (provider === 'local-funasr') {
+            setLocalFunAsrHealth({ state: 'loading', status: '加载中', detail: '' });
+        }
         if (provider === 'alibaba-fun-asr') return;
         try {
             // @ts-ignore
-            await window.electronAPI?.setSttProvider?.(provider);
+            const result = await window.electronAPI?.setSttProvider?.(provider);
+            if (!result?.success) {
+                throw new Error(result?.error || 'Failed to switch speech recognition provider');
+            }
+            if (provider === 'local-funasr') {
+                await handleTestLocalFunAsrConnection();
+            }
         } catch (e) {
             console.error('Failed to set STT provider:', e);
+            setSttProvider(previousProvider);
+            const message = e instanceof Error ? e.message : String(e);
+            setSttTestStatus('error');
+            setSttTestError(message);
+            if (provider === 'local-funasr') {
+                setLocalFunAsrHealth({ state: 'failed', status: '启动失败', detail: message });
+            }
         }
     };
 
@@ -1373,7 +1399,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
 
     const handleTestSttConnection = async () => {
         if (alibabaSaveInFlightRef.current) return;
-        if (sttProvider === 'none' || sttProvider === 'google' || sttProvider === 'natively' || sttProvider === 'local-whisper') return;
+        if (sttProvider === 'none' || sttProvider === 'google' || sttProvider === 'natively' || sttProvider === 'local-whisper' || sttProvider === 'local-funasr') return;
         const keyMap: Record<string, string> = {
             groq: sttGroqKey, openai: sttOpenaiKey, deepgram: sttDeepgramKey,
             elevenlabs: sttElevenLabsKey, azure: sttAzureKey, ibmwatson: sttIbmKey,
@@ -1442,6 +1468,29 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
         } catch (e: any) {
             setSttTestStatus('error');
             setSttTestError(e.message || 'Test failed');
+        }
+    };
+
+    const handleTestLocalFunAsrConnection = async () => {
+        setSttTestStatus('testing');
+        setSttTestError('');
+        setLocalFunAsrHealth({ state: 'loading', status: '加载中', detail: '' });
+        try {
+            const result = await window.electronAPI?.testLocalFunAsrConnection?.();
+            if (result?.success && result.health) {
+                setLocalFunAsrHealth(result.health);
+                setSttTestStatus('success');
+            } else {
+                const message = result?.error || 'Local FunASR connection failed';
+                setLocalFunAsrHealth({ state: 'failed', status: '加载失败', detail: message });
+                setSttTestStatus('error');
+                setSttTestError(message);
+            }
+        } catch (error: any) {
+            const message = error?.message || 'Local FunASR connection failed';
+            setLocalFunAsrHealth({ state: 'failed', status: '加载失败', detail: message });
+            setSttTestStatus('error');
+            setSttTestError(message);
         }
     };
 
@@ -2744,11 +2793,54 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                              { id: 'ibmwatson', label: 'IBM Watson', badge: hasStoredIbmWatsonKey ? 'Saved' : null, desc: t('IBM Watson cloud STT service'), color: 'indigo', icon: <Mic size={14} /> },
                                                              { id: 'soniox', label: 'Soniox', badge: hasStoredSonioxKey ? 'Saved' : null, recommended: true, desc: t('60+ languages, multilingual, domain context'), color: 'cyan', icon: <Mic size={14} /> },
                                                              { id: 'alibaba-fun-asr', label: 'Alibaba Fun-ASR Realtime', badge: hasStoredAlibabaKey ? 'Saved' : null, desc: t('Alibaba Cloud realtime speech recognition'), color: 'orange', icon: <Mic size={14} /> },
+                                                             { id: 'local-funasr', label: 'Local FunASR Nano', badge: 'Local' as const, recommended: true, desc: t('Private transcription that runs on this PC'), color: 'green', icon: <Cpu size={14} /> },
                                                              { id: 'local-whisper', label: 'Local Whisper', badge: null, desc: t('Privacy-first: runs 100% on your device'), color: 'green', icon: <Cpu size={14} /> },
                                                          ]}
                                                      />
                                                  </div>
                                              </div>
+
+                                             {sttProvider === 'local-funasr' && (
+                                                 <div className="bg-bg-card rounded-xl border border-border-subtle p-4 space-y-3">
+                                                     <div className="flex flex-wrap items-center justify-between gap-3">
+                                                         <div className="min-w-0">
+                                                             <div className="flex items-center gap-2">
+                                                                 <Cpu size={15} className="text-emerald-400" />
+                                                                 <span className="text-sm font-medium text-text-primary">Fun-ASR-Nano-251</span>
+                                                                 <span className={`text-[10px] px-2 py-0.5 rounded-full ${localFunAsrHealth?.state === 'ready'
+                                                                     ? 'bg-emerald-500/15 text-emerald-400'
+                                                                     : localFunAsrHealth?.state === 'failed'
+                                                                         ? 'bg-red-500/15 text-red-400'
+                                                                         : 'bg-amber-500/15 text-amber-400'
+                                                                     }`}>
+                                                                     {localFunAsrHealth?.status || t('Not checked')}
+                                                                 </span>
+                                                             </div>
+                                                             <p className="text-[11px] text-text-tertiary mt-1">
+                                                                 {t('Runs locally on 127.0.0.1. First model load usually takes 40–60 seconds; later requests reuse the resident model.')}
+                                                             </p>
+                                                             {localFunAsrHealth?.state === 'ready' && (
+                                                                 <p className="text-[10px] text-text-tertiary mt-1">
+                                                                     {t('Requests')}: {localFunAsrHealth.request_count ?? 0}
+                                                                     {Number.isFinite(localFunAsrHealth.cuda_memory_current_mib) ? ` · GPU ${Number(localFunAsrHealth.cuda_memory_current_mib).toFixed(0)} MiB` : ''}
+                                                                 </p>
+                                                             )}
+                                                         </div>
+                                                         <button
+                                                             onClick={handleTestLocalFunAsrConnection}
+                                                             disabled={sttTestStatus === 'testing'}
+                                                             className="px-4 py-2 rounded-lg text-xs font-medium bg-bg-input hover:bg-bg-elevated border border-border-subtle text-text-primary disabled:opacity-50 transition-colors"
+                                                         >
+                                                             {sttTestStatus === 'testing' ? t('Starting / checking...') : t('Test / Start Local Service')}
+                                                         </button>
+                                                     </div>
+                                                     {localFunAsrHealth?.detail && (
+                                                         <p role="alert" aria-live="polite" className={`text-xs ${localFunAsrHealth.state === 'failed' ? 'text-red-400' : 'text-text-tertiary'}`}>
+                                                             {localFunAsrHealth.detail}
+                                                         </p>
+                                                     )}
+                                                 </div>
+                                             )}
 
                                              {sttProvider === 'alibaba-fun-asr' && (
                                                  <div className="bg-bg-card rounded-xl border border-border-subtle p-4 space-y-4">
@@ -2912,7 +3004,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                             )}
 
                                             {/* API Key Input (non-Google providers) */}
-                                            {sttProvider !== 'google' && sttProvider !== 'alibaba-fun-asr' && sttProvider !== 'local-whisper' && sttProvider !== 'natively' && sttProvider !== 'none' && (
+                                            {sttProvider !== 'google' && sttProvider !== 'alibaba-fun-asr' && sttProvider !== 'local-funasr' && sttProvider !== 'local-whisper' && sttProvider !== 'natively' && sttProvider !== 'none' && (
                                                 <div className="bg-bg-card rounded-xl border border-border-subtle p-4 space-y-3">
                                                     <label className="text-xs font-medium text-text-secondary block">
                                                         {sttProvider === 'groq' ? 'Groq' : sttProvider === 'openai' ? 'OpenAI STT' : sttProvider === 'elevenlabs' ? 'ElevenLabs' : sttProvider === 'azure' ? 'Azure' : sttProvider === 'ibmwatson' ? 'IBM Watson' : sttProvider === 'soniox' ? 'Soniox' : 'Deepgram'} API Key

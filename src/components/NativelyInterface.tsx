@@ -5690,9 +5690,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         setIsManualRecording(false);
         setManualTranscript('');
 
-        window.electronAPI
-          .finalizeMicSTT()
-          .catch((err) => console.error('[NativelyInterface] Failed to send finalizeMicSTT:', err));
+        try {
+          await window.electronAPI.finalizeMicSTT();
+        } catch (err) {
+          console.error('[NativelyInterface] Failed to send finalizeMicSTT:', err);
+        }
 
         const currentAttachments = attachedContext;
         setAttachedContext([]);

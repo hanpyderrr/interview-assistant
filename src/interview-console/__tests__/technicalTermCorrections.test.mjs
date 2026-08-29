@@ -33,7 +33,7 @@ test('keeps canonical terms stable and normalizes every alias idempotently', () 
 });
 
 test('every correction fixture names a report, audio, and KB canonical term', () => {
-  const kbText = fs.readFileSync('knowledge_source/embedded_kb.jsonl', 'utf8');
+  const kbText = fs.readFileSync('knowledge_source/interview_kb.jsonl', 'utf8');
   const entries = kbText.trim().split(/\r?\n/).map(JSON.parse);
   for (const fixture of fixtures) {
     assert.ok(fixture.report && fixture.audio && fixture.alias && fixture.canonical, fixture.id);

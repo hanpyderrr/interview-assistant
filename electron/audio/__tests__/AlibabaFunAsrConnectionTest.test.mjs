@@ -106,6 +106,21 @@ test('succeeds only after open, matching task-started, finish-task, and matching
   assertClean(h);
 });
 
+test('treats EmptyAudio after finishing the zero-audio probe as a successful connection', async () => {
+  const h = harness();
+  h.socket.open();
+  h.socket.message({ header: { event: 'task-started', task_id: TASK_ID }, payload: {} });
+  h.socket.message({
+    header: {
+      event: 'task-failed', task_id: TASK_ID,
+      error_code: 'EmptyAudio', error_message: 'EmptyAudio',
+    },
+  });
+
+  assert.deepEqual(await h.promise, { success: true });
+  assertClean(h);
+});
+
 test('connect, task-started, and task-finished stages each have a fresh deadline', async () => {
   for (const stage of ['connect', 'start', 'finish']) {
     const h = harness();

@@ -76,20 +76,20 @@ test('answer requests include bounded conversation context while retrieval and p
   assert.match(consoleSource, /buildRecentInterviewContext\(conversationTurnsRef\.current,[\s\S]{0,180}includeCandidateSpeech/);
   assert.match(consoleSource, /import \{ normalizeInterviewQuestion \} from '\.\/questionNormalization'/);
   assert.match(consoleSource, /analysisQuestion: normalizeInterviewQuestion\(question\)/);
-  assert.match(consoleSource, /buildInterviewConsolePrompt\(job\.analysisQuestion, context, job\.conversationContext\)/);
+  assert.match(consoleSource, /buildInterviewConsolePrompt\(job\.analysisQuestion, context, job\.conversationContext, job\.answerLevel\)/);
   assert.match(consoleSource, /retrieveInterviewKnowledge\?\.\(job\.analysisQuestion\)/);
 });
 
 test('prewarms the latest normalized question and consumes matching retrieval work', () => {
   assert.match(consoleSource, /createAnswerPrewarmCache/);
   assert.match(consoleSource, /answerPrewarmRef\.current\.prewarm/);
-  assert.match(consoleSource, /answerPrewarmRef\.current\.consume\(job\.analysisQuestion, job\.conversationContext\)/);
+  assert.match(consoleSource, /answerPrewarmRef\.current\.consume\(job\.analysisQuestion, job\.conversationContext, job\.answerLevel\)/);
 });
 
 test('simplified display question is stored for answer history and UI selection', () => {
   assert.match(consoleSource, /const question = toSimplifiedChinese\(action\.question\)/);
   assert.match(consoleSource, /dispatchAnswer\(\{ type: 'enqueue', id, question/);
-  assert.match(consoleSource, /dispatchAnswer\(\{ type: 'enqueue', id, question, select \}\)/);
+  assert.match(consoleSource, /dispatchAnswer\(\{ type: 'enqueue', id, question, select, answerLevel: job\.answerLevel \}\)/);
 });
 
 // Phase 18 Step 5: the renderer now uses one answer/history row per coordinator

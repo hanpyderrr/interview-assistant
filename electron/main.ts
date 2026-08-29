@@ -1226,6 +1226,11 @@ import {
   createAlibabaFunAsrProviderPair,
   type AlibabaFunAsrProviderPair,
 } from "./audio/alibabaFunAsrProviderFactory"
+import {
+  createLocalFunAsrProviderPair,
+  type LocalFunAsrProviderPair,
+} from "./audio/localFunAsrProviderFactory"
+import { localFunAsrServiceManager } from "./audio/localFunAsrServiceManager"
 import { waitForSttDrain } from "./audio/sttDrain"
 import { LocalWhisperSequenceCoordinator } from "./audio/localWhisperSequenceCoordinator"
 import { ThemeManager } from "./ThemeManager"
@@ -1244,6 +1249,8 @@ type STTProvider = {
   stop(): void;
   start?: () => void;
   finalize?: () => void | Promise<void>;
+  flush?: () => void | Promise<void>;
+  drainTimeoutMs?: number;
   setAudioChannelCount?: (count: number) => void;
   notifySpeechEnded?: () => void;
   beginSession?: (meetingGeneration: number, originMonotonicMs: number) => void;
@@ -3084,6 +3091,7 @@ export class AppState {
   private googleSTT: STTProvider | null = null; // Interviewer
   private googleSTT_User: STTProvider | null = null; // User
   private alibabaFunAsrPair: AlibabaFunAsrProviderPair | null = null;
+  private localFunAsrPair: LocalFunAsrProviderPair | null = null;
 
   private createSTTProvider(speaker: 'interviewer' | 'user'): STTProvider | null {
     const { CredentialsManager } = require('./services/CredentialsManager');
@@ -3219,6 +3227,11 @@ export class AppState {
       lws.setChannel(speaker === 'interviewer' ? 'system' : 'mic');
       lws.beginSession(this._transcriptSessionId, this._captureOriginMonotonicMs);
       stt = lws as any;
+    } else if (sttProvider === 'local-funasr') {
+      if (!this.localFunAsrPair) {
+        this.initializeLocalFunAsrProviderPair();
+      }
+      return this.localFunAsrPair![speaker];
     } else if (sttProvider === 'alibaba-fun-asr') {
       if (!this.alibabaFunAsrPair) {
         this.initializeAlibabaFunAsrProviderPair();
@@ -3518,6 +3531,35 @@ export class AppState {
       pair.user.removeAllListeners();
       throw error;
     }
+  }
+
+  private initializeLocalFunAsrProviderPair(): void {
+    if (this.localFunAsrPair && this.googleSTT && this.googleSTT_User) return;
+
+    const pair = createLocalFunAsrProviderPair();
+    const sttLanguage = CredentialsManager.getInstance().getSttLanguage();
+    try {
+      const interviewer = this.configureSTTProvider(pair.interviewer, 'interviewer', 'local-funasr', sttLanguage);
+      const user = this.configureSTTProvider(pair.user, 'user', 'local-funasr', sttLanguage);
+      this.localFunAsrPair = pair;
+      this.googleSTT = interviewer;
+      this.googleSTT_User = user;
+    } catch (error) {
+      pair.interviewer.stop();
+      pair.user.stop();
+      pair.interviewer.removeAllListeners();
+      pair.user.removeAllListeners();
+      throw error;
+    }
+  }
+
+  private async ensureLocalFunAsrReady(context: string): Promise<void> {
+    if (CredentialsManager.getInstance().getSttProvider() !== 'local-funasr') return;
+    const health = await localFunAsrServiceManager.ensureReady();
+    console.log(`[LocalFunASR] Service ready (${context})`, {
+      modelLoadSeconds: health.model_load_seconds,
+      warmupSeconds: health.warmup_seconds,
+    });
   }
 
   /**
@@ -3965,6 +4007,29 @@ export class AppState {
           });
           throw sttErr;
         }
+      } else if (sttProv === 'local-funasr') {
+        try {
+          this.initializeLocalFunAsrProviderPair();
+        } catch (sttErr) {
+          console.error('[Main] Local FunASR pair initialization failed:', sttErr);
+          this.sendAudioCaptureFailed({
+            channel: 'system',
+            message: 'Local FunASR failed to initialize. Check the local service in Settings.',
+            attempt: 0,
+            maxAttempts: 0,
+            terminal: true,
+            stuck: false,
+          });
+          this.sendAudioCaptureFailed({
+            channel: 'mic',
+            message: 'Local FunASR failed to initialize. Check the local service in Settings.',
+            attempt: 0,
+            maxAttempts: 0,
+            terminal: true,
+            stuck: false,
+          });
+          throw sttErr;
+        }
       } else {
       if (!this.googleSTT) {
         console.log(`[Main] Creating interviewer STT provider: ${sttProv}`);
@@ -4083,6 +4148,7 @@ export class AppState {
       return;
     }
     console.log('[Main] System resume — restarting captures so CoreAudio/cpal handles are fresh.');
+    await this.ensureLocalFunAsrReady('resume');
 
     // B7: reset ALL audio recovery state BEFORE recreating captures. State is
     // tied to a SPECIFIC capture instance's failure history; once we destroy
@@ -4127,6 +4193,26 @@ export class AppState {
       this.googleSTT_User = null;
     }
     this.alibabaFunAsrPair = null;
+    this.localFunAsrPair = null;
+
+    // Local FunASR is final-only and has no reconnecting socket. Recreate and
+    // bind both channels before capture starts so the first post-resume PCM
+    // frames cannot fall through the optional write calls below.
+    if (CredentialsManager.getInstance().getSttProvider() === 'local-funasr') {
+      try {
+        this.initializeLocalFunAsrProviderPair();
+        this.googleSTT = this.createSTTProvider('interviewer');
+        this.googleSTT_User = this.createSTTProvider('user');
+        this.googleSTT?.start?.();
+        this.googleSTT_User?.start?.();
+        this.localFunAsrPair?.beginSession(this._transcriptSessionId, this._captureOriginMonotonicMs);
+      } catch (sttErr) {
+        console.error('[Main] Resume: local FunASR recreate failed:', sttErr);
+        this.googleSTT = null;
+        this.googleSTT_User = null;
+        this.localFunAsrPair = null;
+      }
+    }
 
     // Mic first. MicrophoneCapture is lazy-init: start() constructs the cpal
     // input stream. Do this before starting the CoreAudio system tap so cpal
@@ -4228,6 +4314,8 @@ export class AppState {
     }
     if (CredentialsManager.getInstance().getSttProvider() === 'alibaba-fun-asr') {
       this.alibabaFunAsrPair?.beginSession(this._transcriptSessionId, this._captureOriginMonotonicMs);
+    } else if (CredentialsManager.getInstance().getSttProvider() === 'local-funasr') {
+      this.localFunAsrPair?.beginSession(this._transcriptSessionId, this._captureOriginMonotonicMs);
     }
   }
 
@@ -4756,6 +4844,13 @@ export class AppState {
 
   private async _doReconfigureSttProvider(): Promise<void> {
     console.log('[Main] Reconfiguring STT Provider...');
+    if (this.isMeetingActive) {
+      await this.ensureLocalFunAsrReady('provider reconfigure');
+    } else if (CredentialsManager.getInstance().getSttProvider() === 'local-funasr') {
+      void localFunAsrServiceManager.ensureReady().catch((err) => {
+        console.warn('[LocalFunASR] Background start after provider selection failed:', err);
+      });
+    }
 
     // RC-01 fix: pause audio captures FIRST so their EventEmitter queues drain
     // before we null-out the STT instances. Without this, buffered 'data' events
@@ -4792,6 +4887,7 @@ export class AppState {
       this.googleSTT_User = null;
     }
     this.alibabaFunAsrPair = null;
+    this.localFunAsrPair = null;
 
     // Only reinitialize the pipeline when a meeting is already active.
     // Outside a meeting, defer pipeline creation to startMeeting() so we never
@@ -4801,6 +4897,8 @@ export class AppState {
       await this.setupSystemAudioPipeline();
       if (CredentialsManager.getInstance().getSttProvider() === 'alibaba-fun-asr') {
         this.alibabaFunAsrPair?.beginSession(this._transcriptSessionId, this._captureOriginMonotonicMs);
+      } else if (CredentialsManager.getInstance().getSttProvider() === 'local-funasr') {
+        this.localFunAsrPair?.beginSession(this._transcriptSessionId, this._captureOriginMonotonicMs);
       }
       // Mic first: lazy mic start constructs the cpal input stream; do it
       // before starting the CoreAudio system tap to avoid HAL contention.
@@ -5517,12 +5615,16 @@ export class AppState {
     }
   }
 
-  public finalizeMicSTT(): void {
+  public async finalizeMicSTT(): Promise<void> {
     // We only want to finalize the user microphone, because the context is Manual Answer
-    if (this.googleSTT_User?.finalize) {
-      console.log('[Main] Finalizing STT');
-      this.googleSTT_User.finalize();
+    if (!this.googleSTT_User) return;
+
+    console.log('[Main] Flushing microphone STT');
+    if (this.googleSTT_User.flush) {
+      await this.googleSTT_User.flush();
+      return;
     }
+    await this.googleSTT_User.finalize?.();
   }
 
   public async startMeeting(metadata?: any): Promise<void> {
@@ -5538,6 +5640,9 @@ export class AppState {
       const error = new Error('Speech-to-text is not configured. Choose a provider in Settings > Audio before starting a meeting.') as Error & { code?: string };
       error.code = 'stt-not-configured';
       throw error;
+    }
+    if (configuredSttProvider === 'local-funasr') {
+      await this.ensureLocalFunAsrReady('meeting start');
     }
 
     // If a previous endMeeting() is still draining STT in the background, wait
@@ -5574,6 +5679,23 @@ export class AppState {
         this.googleSTT = null;
         this.googleSTT_User = null;
         this.alibabaFunAsrPair = null;
+        throw error;
+      }
+    } else if (configuredSttProvider === 'local-funasr') {
+      this.initializeLocalFunAsrProviderPair();
+      try {
+        this.localFunAsrPair?.beginSession(
+          this._transcriptSessionId,
+          captureOriginMonotonicMs,
+        );
+      } catch (error) {
+        this.googleSTT?.stop();
+        this.googleSTT_User?.stop();
+        this.googleSTT?.removeAllListeners();
+        this.googleSTT_User?.removeAllListeners();
+        this.googleSTT = null;
+        this.googleSTT_User = null;
+        this.localFunAsrPair = null;
         throw error;
       }
     }
@@ -6076,8 +6198,15 @@ export class AppState {
 
         // 1. Wait for Promise-aware providers (Fun-ASR resolves on task-finished)
         //    while retaining the legacy 250ms grace used by void finalizers.
-        //    The 2s cap guarantees teardown cannot wedge a subsequent meeting.
-        const drainResult = await waitForSttDrain(finishPromises, 2000, { minimumWaitMs: 250 });
+        //    Batch providers may declare a longer request-bound drain deadline.
+        const sttDrainTimeoutMs = Math.max(
+          2000,
+          ...drainingSttProviders.map((provider) => {
+            const timeoutMs = provider.drainTimeoutMs;
+            return Number.isFinite(timeoutMs) && Number(timeoutMs) > 0 ? Number(timeoutMs) : 0;
+          }),
+        );
+        const drainResult = await waitForSttDrain(finishPromises, sttDrainTimeoutMs, { minimumWaitMs: 250 });
         if (drainResult === 'timed-out') {
           console.warn('[Main] STT drain deadline reached; forcing provider stop.', {
             providerCount: drainingSttProviders.length,
@@ -7808,6 +7937,14 @@ if (process.env.THINKING_MATRIX === '1') {
       }
     })();
     return;
+  }
+
+  // The local model takes tens of seconds to load. Start it as soon as the app
+  // knows it is selected so meeting start usually pays only a health check.
+  if (CredentialsManager.getInstance().getSttProvider() === 'local-funasr') {
+    void localFunAsrServiceManager.ensureReady().catch((err) => {
+      console.warn('[Init] Local FunASR service prewarm failed (will retry on meeting start):', err);
+    });
   }
 
   // PERF: pre-construct STT provider objects so the meeting-start critical

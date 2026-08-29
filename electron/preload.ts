@@ -306,7 +306,8 @@ interface ElectronAPI {
       | 'soniox'
       | 'natively'
       | 'local-whisper'
-      | 'alibaba-fun-asr',
+      | 'alibaba-fun-asr'
+      | 'local-funasr',
   ) => Promise<{ success: boolean; error?: string }>;
   localWhisperGetModels: () => Promise<{ models: any[]; activeModelId: string }>;
   localWhisperGetRecoveryNotice: () => Promise<{
@@ -382,6 +383,20 @@ interface ElectronAPI {
     apiKey: string,
     regionOrConfig?: string | AlibabaFunAsrPublicConfig,
   ) => Promise<{ success: boolean; error?: string }>;
+  testLocalFunAsrConnection: () => Promise<{
+    success: boolean;
+    health?: {
+      state: 'loading' | 'ready' | 'failed';
+      status: string;
+      detail: string;
+      request_count?: number;
+      success_count?: number;
+      failure_count?: number;
+      cuda_memory_current_mib?: number | null;
+      cuda_memory_peak_mib?: number | null;
+    };
+    error?: string;
+  }>;
 
   // STT Config Events
   onSttConfigChanged: (
@@ -1571,7 +1586,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       | 'soniox'
       | 'natively'
       | 'local-whisper'
-      | 'alibaba-fun-asr',
+      | 'alibaba-fun-asr'
+      | 'local-funasr',
   ) => ipcRenderer.invoke('set-stt-provider', provider),
   getSttProvider: () => ipcRenderer.invoke('get-stt-provider'),
   setGroqSttApiKey: (apiKey: string) => ipcRenderer.invoke('set-groq-stt-api-key', apiKey),
@@ -1594,6 +1610,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     apiKey: string,
     regionOrConfig?: string | AlibabaFunAsrPublicConfig,
   ) => ipcRenderer.invoke('test-stt-connection', provider, apiKey, regionOrConfig),
+  testLocalFunAsrConnection: () => ipcRenderer.invoke('test-local-funasr-connection'),
   localWhisperGetModels: () => ipcRenderer.invoke('local-whisper-get-models'),
   localWhisperGetRecoveryNotice: () => ipcRenderer.invoke('local-whisper-get-recovery-notice'),
   onnxGetRecoveryNotice: (family) => ipcRenderer.invoke('onnx-get-recovery-notice', family),

@@ -158,3 +158,35 @@ test('revise for an unknown answer id does not create an item', () => {
   assert.equal(after.items[0].id, ANSWER_ID);
   assert.equal(after.items[0].question, FIRST_QUESTION);
 });
+
+test('enqueue defaults to student and revise preserves the answer-level snapshot', () => {
+  let state = createAnswerHistoryState(10);
+  state = answerHistoryReducer(state, {
+    type: 'enqueue', id: 1, question: '怎么设计 RAG？', answerLevel: 'mid',
+  });
+  state = answerHistoryReducer(state, {
+    type: 'revise', id: 1, question: '怎么设计 RAG？如何处理故障？',
+  });
+  assert.equal(state.items[0].answerLevel, 'mid');
+
+  let defaultState = createAnswerHistoryState(10);
+  defaultState = answerHistoryReducer(defaultState, { type: 'enqueue', id: 2, question: '什么是 RAG？' });
+  assert.equal(defaultState.items[0].answerLevel, 'student');
+});
+
+test('local fallback wording follows the answer-level snapshot', () => {
+  const answers = {};
+  for (const answerLevel of ['student', 'mid', 'senior']) {
+    let state = createAnswerHistoryState(10);
+    state = answerHistoryReducer(state, {
+      type: 'enqueue', id: 1, question: '怎么设计 RAG？', answerLevel,
+    });
+    state = answerHistoryReducer(state, { type: 'error', id: 1, error: 'offline' });
+    answers[answerLevel] = state.items[0].answer;
+  }
+
+  assert.match(answers.student, /我的理解|学习|个人项目/);
+  assert.match(answers.mid, /实现|排查|取舍/);
+  assert.match(answers.senior, /架构|可靠性|容量|约束/);
+  assert.equal(new Set(Object.values(answers)).size, 3);
+});

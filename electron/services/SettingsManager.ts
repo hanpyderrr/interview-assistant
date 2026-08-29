@@ -71,10 +71,6 @@ export interface AppSettings {
     // HindsightManager.hindsightMemoryExplicitlyOff()).
     hindsightMemoryEnabledExplicit?: boolean;
     knowledgeMode?: boolean;
-    // Interview knowledge base direction: which KB file the interview console
-    // retrieval mounts ('ai' → ai_kb.jsonl, 'embedded' → embedded_kb.jsonl).
-    // Invalid or absent → 'embedded' (previous single-KB behavior).
-    interviewKbDirection?: InterviewKbDirection;
     phoneMirrorEnabled?: boolean;
     phoneMirrorExposeOnLan?: boolean;
     // External optional provider. Default false: do not spawn Ollama unless
@@ -181,9 +177,6 @@ export interface AppSettings {
 
 export const VALID_CONTEXT_DEBUG_LEVELS = ['off', 'standard', 'verbose'] as const;
 export type ContextDebugLevelSetting = typeof VALID_CONTEXT_DEBUG_LEVELS[number];
-
-export const VALID_INTERVIEW_KB_DIRECTIONS = ['ai', 'embedded'] as const;
-export type InterviewKbDirection = typeof VALID_INTERVIEW_KB_DIRECTIONS[number];
 
 export const VALID_SCREEN_UNDERSTANDING_MODES = ['vision_first', 'vision_only', 'private_vision'] as const;
 export type ScreenUnderstandingMode = typeof VALID_SCREEN_UNDERSTANDING_MODES[number];
@@ -295,20 +288,6 @@ export class SettingsManager {
 
     public getTechnicalInterviewVisionFirst(): boolean {
         return this.settings.technicalInterviewVisionFirst !== false;
-    }
-
-    public getInterviewKbDirection(): InterviewKbDirection {
-        const stored = this.settings.interviewKbDirection;
-        if (stored && (VALID_INTERVIEW_KB_DIRECTIONS as readonly string[]).includes(stored)) return stored;
-        return 'embedded';
-    }
-
-    public setInterviewKbDirection(direction: InterviewKbDirection): void {
-        if (!(VALID_INTERVIEW_KB_DIRECTIONS as readonly string[]).includes(direction)) {
-            throw new Error(`[SettingsManager] Invalid interviewKbDirection: ${direction}`);
-        }
-        this.settings.interviewKbDirection = direction;
-        this.saveSettings();
     }
 
     public getAlibabaFunAsrConfig(): AlibabaFunAsrPublicConfig {

@@ -1,0 +1,2 @@
+{"id":"qa.example.spi","title":"SPI 字节流解析","category":"embedded","fact_status":"prepared_answer","evidence_status":"draft","content":"在这里填写经过本人确认的面试回答。","source_paths":["user-provided"],"keywords":["SPI","帧同步","CRC"],"project_ids":[],"target_roles":["embedded_linux"]}
+{"id":"qa.example.rag","title":"RAG 检索边界","category":"ai","fact_status":"prepared_answer","evidence_status":"draft","content":"在这里填写检索方案、事实边界和验证方法。","source_paths":["user-provided"],"keywords":["RAG","BM25","事实边界"],"project_ids":[],"target_roles":["ai_agent"]}

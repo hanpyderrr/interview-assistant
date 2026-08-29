@@ -37,6 +37,22 @@ test('retrieves SPI and CRC facts for a protocol question', async () => {
   assert.ok(results[0].score > 0);
 });
 
+test('keeps spidev and SPI_IOC_MESSAGE as separate searchable Latin terms', () => {
+  const entries = [
+    { id: 'spi', title: 'Linux SPI', content: '用户态接口', keywords: ['spidev', 'SPI_IOC_MESSAGE'], fact_status: 'reference' },
+    { id: 'other', title: '其他接口', content: '普通内容', keywords: ['ioctl'], fact_status: 'reference' },
+  ];
+  assert.equal(searchKnowledgeBase('spidev 和 SPI_IOC_MESSAGE 有什么区别', entries, 2)[0].entry.id, 'spi');
+});
+
+test('recognizes TofFrame as a TOF project query', () => {
+  const entries = [
+    { id: 'generic', title: 'CRC 错误', content: '通用 CRC 说明', keywords: ['CRC'], fact_status: 'prepared_answer' },
+    { id: 'tof', title: 'TofFrame 边界', content: 'CRC 不能恢复已丢失数据', keywords: ['TofFrame', 'CRC'], project_ids: ['tof'], fact_status: 'prepared_answer' },
+  ];
+  assert.equal(searchKnowledgeBase('TofFrame CRC 能恢复丢失数据吗', entries, 2)[0].entry.id, 'tof');
+});
+
 test('builds bounded answer context with fact boundaries', async () => {
   const entries = await loadKnowledgeBase(EMBEDDED_KB);
   const context = buildAnswerContext('为什么使用多进程', entries, { topK: 3, maxChars: 1800 });
@@ -86,4 +102,42 @@ test('prefers a project-specific boundary answer over a cross-project protocol t
     2,
   );
   assert.equal(results[0].entry.id, 'wing.boundary');
+});
+
+test('uses explicit metadata to separate every resume project', () => {
+  const ids = ['tof', 'ice_temperature', 'wing_icing', 'plankiller', 'career_evidence_lab', 'genealogy_agent'];
+  for (const id of ids) {
+    const entries = ids.map((projectId) => ({
+      id: projectId,
+      title: '项目边界',
+      content: '说明真实完成范围。',
+      keywords: ['项目边界'],
+      project_ids: [projectId],
+      fact_status: 'resume_fact',
+    }));
+    assert.equal(searchKnowledgeBase(`请说明 ${id} 的项目边界`, entries, 6)[0].entry.id, id);
+  }
+});
+
+test('marks planned and in-progress capabilities in CLI context', () => {
+  const entries = [
+    {
+      id: 'career.plan',
+      title: '十题面试',
+      content: '设计十题动态面试。',
+      keywords: ['十题面试'],
+      fact_status: 'prepared_answer',
+      evidence_status: 'planned',
+    },
+    {
+      id: 'career.progress',
+      title: '当前进度',
+      content: '项目处于开发阶段。',
+      keywords: ['当前进度'],
+      fact_status: 'resume_fact',
+      evidence_status: 'in_progress',
+    },
+  ];
+  assert.match(buildAnswerContext('十题面试', entries), /规划能力，不得表述为已实现/);
+  assert.match(buildAnswerContext('当前进度', entries), /开发在研，需说明当前完成阶段/);
 });

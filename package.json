@@ -106,7 +106,9 @@
     "files": [
       "dist",
       "dist-electron",
-      "knowledge_source",
+      "knowledge_source/README.md",
+      "knowledge_source/interview_kb.example.jsonl",
+      "!knowledge_source/*_kb.jsonl",
       "native-module",
       "package.json",
       "node_modules",

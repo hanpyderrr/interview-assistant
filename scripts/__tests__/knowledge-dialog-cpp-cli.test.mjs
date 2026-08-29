@@ -51,7 +51,7 @@ test('uses C++ questions/evaluations and closes the child after a bounded live r
     '--live', '--interviewer', 'cpp',
     '--cpp-executable', 'C:\\fixture\\CppInterviewText.exe',
     '--cpp-config', 'C:\\fixture\\config.json',
-    '--kb', 'knowledge_source/embedded_kb.example.jsonl',
+    '--kb', 'knowledge_source/interview_kb.example.jsonl',
     '--fixtures', 'validation/knowledge-dialog/fixtures/dialog-cases.jsonl',
     '--max-questions', '1', '--max-followups', '1',
   ]);
