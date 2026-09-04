@@ -6,7 +6,8 @@ const source = readFileSync(new URL('../../src/components/SettingsOverlay.tsx', 
 
 test('settings lists local FunASR as a selectable on-device provider', () => {
   assert.match(source, /id: 'local-funasr'/);
-  assert.match(source, /label: 'Local FunASR Nano'/);
+  assert.match(source, /label: 'Local FunASR Paraformer'/);
+  assert.match(source, />Paraformer 中文\/英文</);
   assert.match(source, /runs on this PC/i);
 });
 

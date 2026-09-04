@@ -89,3 +89,35 @@
   .transcript-panel{min-height:560px}
   .confirmed-question{max-height:220px}
 }
+
+/* Keep session actions outside the scrolling settings, even in short windows. */
+.console-grid{container-type:size}
+.control-rail{display:grid;grid-template-rows:auto minmax(0,1fr) auto;height:100cqh;max-height:100cqh;align-self:start;box-sizing:border-box;padding:16px 12px}
+.control-rail>.panel-heading{margin-bottom:12px}
+.rail-scroll-region{min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-gutter:stable;padding-right:3px}
+.rail-scroll-region:focus-visible{outline:1px solid var(--cyan);outline-offset:-1px;border-radius:4px}
+.rail-bottom{padding-top:12px;border-top:1px solid var(--line);margin-top:12px;background:transparent}
+.rail-bottom .rail-actions{margin-top:0}
+.rail-bottom .rail-note{margin-top:6px}
+.rail-bottom .rail-error{max-height:64px;overflow-y:auto;overflow-wrap:anywhere;margin:8px 0 0;color:#ffb0a6;font-size:11px;line-height:1.4}
+.control-rail .rail-divider{margin:14px 0}
+
+@media (max-height:760px){
+  .control-rail{padding:12px}
+  .control-rail>.panel-heading{margin-bottom:8px}
+  .control-stack{gap:6px}
+  .control-rail .field-label{margin-top:2px}
+  .control-rail .rail-divider{margin:10px 0}
+  .control-rail .signal-card{padding:8px}
+  .control-rail .mini-wave{height:24px;margin:5px 0}
+  .control-rail .candidate-context-toggle{padding:7px;margin-top:3px}
+  .rail-bottom{padding-top:8px;margin-top:8px}
+}
+
+@media (min-width:721px) and (max-width:1100px){
+  .control-rail{position:sticky;top:0}
+}
+
+@media (max-width:720px){
+  .control-rail{flex:none;width:100%}
+}

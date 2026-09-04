@@ -2793,7 +2793,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                              { id: 'ibmwatson', label: 'IBM Watson', badge: hasStoredIbmWatsonKey ? 'Saved' : null, desc: t('IBM Watson cloud STT service'), color: 'indigo', icon: <Mic size={14} /> },
                                                              { id: 'soniox', label: 'Soniox', badge: hasStoredSonioxKey ? 'Saved' : null, recommended: true, desc: t('60+ languages, multilingual, domain context'), color: 'cyan', icon: <Mic size={14} /> },
                                                              { id: 'alibaba-fun-asr', label: 'Alibaba Fun-ASR Realtime', badge: hasStoredAlibabaKey ? 'Saved' : null, desc: t('Alibaba Cloud realtime speech recognition'), color: 'orange', icon: <Mic size={14} /> },
-                                                             { id: 'local-funasr', label: 'Local FunASR Nano', badge: 'Local' as const, recommended: true, desc: t('Private transcription that runs on this PC'), color: 'green', icon: <Cpu size={14} /> },
+                                                             { id: 'local-funasr', label: 'Local FunASR Paraformer', badge: 'Local' as const, recommended: true, desc: t('Private transcription that runs on this PC'), color: 'green', icon: <Cpu size={14} /> },
                                                              { id: 'local-whisper', label: 'Local Whisper', badge: null, desc: t('Privacy-first: runs 100% on your device'), color: 'green', icon: <Cpu size={14} /> },
                                                          ]}
                                                      />
@@ -2806,7 +2806,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                          <div className="min-w-0">
                                                              <div className="flex items-center gap-2">
                                                                  <Cpu size={15} className="text-emerald-400" />
-                                                                 <span className="text-sm font-medium text-text-primary">Fun-ASR-Nano-251</span>
+                                                                 <span className="text-sm font-medium text-text-primary">Paraformer 中文/英文</span>
                                                                  <span className={`text-[10px] px-2 py-0.5 rounded-full ${localFunAsrHealth?.state === 'ready'
                                                                      ? 'bg-emerald-500/15 text-emerald-400'
                                                                      : localFunAsrHealth?.state === 'failed'
@@ -2817,7 +2817,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                                  </span>
                                                              </div>
                                                              <p className="text-[11px] text-text-tertiary mt-1">
-                                                                 {t('Runs locally on 127.0.0.1. First model load usually takes 40–60 seconds; later requests reuse the resident model.')}
+                                                                 {t('Runs locally on 127.0.0.1. The first start installs the runtime and downloads a 241 MB model; later starts reuse it.')}
                                                              </p>
                                                              {localFunAsrHealth?.state === 'ready' && (
                                                                  <p className="text-[10px] text-text-tertiary mt-1">

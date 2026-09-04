@@ -69,6 +69,27 @@ test('launches once on Windows, polls loading, and deduplicates concurrent calle
   assert.equal(healthCount, 3);
 });
 
+test('launches the bundled local service on macOS and waits until it is ready', async () => {
+  let launchCount = 0;
+  let healthCount = 0;
+  const manager = new LocalFunAsrServiceManager({
+    readHealth: async () => {
+      healthCount += 1;
+      if (healthCount === 1) throw new Error('ECONNREFUSED');
+      return { state: 'ready', status: '已就绪', detail: 'Paraformer ONNX CPU' };
+    },
+    launchService: () => { launchCount += 1; },
+    sleep: async () => {},
+    platform: 'darwin',
+  });
+
+  const health = await manager.ensureReady({ pollIntervalMs: 1, timeoutMs: 1000 });
+
+  assert.equal(health.state, 'ready');
+  assert.equal(launchCount, 1);
+  assert.equal(healthCount, 2);
+});
+
 test('surfaces model load failures and does not relaunch an occupied failed service', async () => {
   let launchCount = 0;
   const manager = new LocalFunAsrServiceManager({
@@ -82,7 +103,7 @@ test('surfaces model load failures and does not relaunch an occupied failed serv
   assert.equal(launchCount, 0);
 });
 
-test('does not attempt Windows launch on unsupported platforms', async () => {
+test('does not attempt a bundled launch on unsupported platforms', async () => {
   let launchCount = 0;
   const manager = new LocalFunAsrServiceManager({
     readHealth: async () => { throw new Error('ECONNREFUSED'); },

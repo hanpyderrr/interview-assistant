@@ -160,6 +160,16 @@
       {
         "from": "resources/models/",
         "to": "models/"
+      },
+      {
+        "from": "local-funasr/",
+        "to": "local-funasr/",
+        "filter": [
+          "**/*",
+          "!.venv/**",
+          "!models/**",
+          "!*.log"
+        ]
       }
     ],
     "mac": {

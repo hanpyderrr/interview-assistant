@@ -120,6 +120,31 @@ function launchWindowsService(serviceRoot: string): void {
   child.unref();
 }
 
+function resolveMacServiceRoot(): string {
+  const override = process.env.NATIVELY_LOCAL_FUNASR_ROOT?.trim();
+  if (override) return path.resolve(override);
+  if (__dirname.includes('app.asar') && process.resourcesPath) {
+    return path.join(process.resourcesPath, 'local-funasr');
+  }
+  return path.resolve(process.cwd(), 'local-funasr');
+}
+
+function launchMacService(serviceRoot: string): void {
+  const scriptPath = path.join(serviceRoot, 'start-service.sh');
+  if (!existsSync(scriptPath)) {
+    throw new Error(`未找到本地 FunASR 启动脚本：${scriptPath}`);
+  }
+  const child = spawn('/bin/zsh', [scriptPath, '--port', '8765'], {
+    cwd: serviceRoot,
+    detached: false,
+    stdio: 'ignore',
+  });
+  child.on('error', (error) => {
+    console.error('[LocalFunASR] 启动 macOS 服务失败:', error);
+  });
+  child.unref();
+}
+
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -133,11 +158,16 @@ export class LocalFunAsrServiceManager {
   private readinessPromise: Promise<LocalFunAsrHealth> | null = null;
 
   constructor(dependencies: LocalFunAsrServiceManagerDependencies = {}) {
-    const serviceRoot = dependencies.serviceRoot ?? DEFAULT_SERVICE_ROOT;
+    const platform = dependencies.platform ?? process.platform;
+    const serviceRoot = dependencies.serviceRoot
+      ?? (platform === 'darwin' ? resolveMacServiceRoot() : DEFAULT_SERVICE_ROOT);
     this.readHealth = dependencies.readHealth ?? fetchLocalFunAsrHealth;
-    this.launchService = dependencies.launchService ?? (() => launchWindowsService(serviceRoot));
+    this.launchService = dependencies.launchService ?? (() => {
+      if (platform === 'darwin') launchMacService(serviceRoot);
+      else launchWindowsService(serviceRoot);
+    });
     this.sleep = dependencies.sleep ?? delay;
-    this.platform = dependencies.platform ?? process.platform;
+    this.platform = platform;
     this.now = dependencies.now ?? Date.now;
   }
 
@@ -166,8 +196,8 @@ export class LocalFunAsrServiceManager {
       health = await this.readHealth();
     } catch (error) {
       if (!autoStart) throw error;
-      if (this.platform !== 'win32') {
-        throw new Error('本地 FunASR 自动启动目前仅支持 Windows', { cause: error });
+      if (this.platform !== 'win32' && this.platform !== 'darwin') {
+        throw new Error('本地 FunASR 自动启动目前仅支持 Windows 和 macOS', { cause: error });
       }
       await this.launchService();
     }
