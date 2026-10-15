@@ -120,7 +120,7 @@ OLLAMA_URL=http://localhost:11434
 
 - 本项目是 **Natively 的 fork**，遵循上游 `LICENSE`（Natively Personal Use Source License v1.0）：**个人、教育、研究、非商业用途**，源码可见但非开源协议。
 - 禁止商业使用、付费分发、SaaS 化、重新许可。
-- 本地知识库含真实个人信息时，请勿公开提交；仓库已通过 `.gitignore` 隔离本地题库与测试产物。
+- 仓库包含作者选择公开的[项目知识库](knowledge_source/README.md)和 [Markdown 学习资料](面试助手知识库/使用说明.md)；个人经历仅适用于作者。使用者请替换为自己的资料，凭据、缓存和真实问答测试报告仍不入库。
 - 面试助手仅提供参考提示，不构成任何录用/职业建议。
 
 ## 📄 上游与致谢

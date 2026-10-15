@@ -500,6 +500,7 @@ benchmark-results/
 /knowledge_source/*
 !/knowledge_source/README.md
 !/knowledge_source/interview_kb.example.jsonl
+!/knowledge_source/interview_kb.jsonl
 /realtime_audio/__pycache__/
 /realtime_audio/session-live/
 /realtime_audio/session-output/
@@ -532,5 +533,10 @@ docs/superpowers/plans/*
 /release2/
 /release3/
 
-# Personal knowledge documents and interview transcripts stay local.
-/面试助手知识库/
+# Publish knowledge documents; keep local workspace state and test transcripts out.
+/面试助手知识库/.obsidian/
+/面试助手知识库/.planning/
+/面试助手知识库/05-面试复盘/20*.md
+/面试助手知识库/未命名.canvas
+/面试助手知识库/  .md
+!/面试助手知识库/09-动手练习/code/test_python.py

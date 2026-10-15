@@ -1,12 +1,18 @@
 # 统一面试知识库
 
-应用只读取一个私人知识库：
+应用只读取一个统一知识库：
 
 ```text
 interview_kb.jsonl
 ```
 
-它同时服务 AI Agent 与嵌入式 Linux 面试，不再使用 `ai_kb.jsonl`、`embedded_kb.jsonl` 或方向设置。真实知识库不进入 Git，也不会打进安装包；仓库只保留虚构的 `interview_kb.example.jsonl`。
+它同时服务 AI Agent 与嵌入式 Linux 面试，不再使用 `ai_kb.jsonl`、`embedded_kb.jsonl` 或方向设置。仓库现包含当前项目使用的 `interview_kb.jsonl`，以及虚构示例 `interview_kb.example.jsonl`；适合阅读的 Markdown 资料位于 [面试助手知识库](../面试助手知识库/使用说明.md)。
+
+当前 JSONL 有 489 条知识，涵盖项目经历、嵌入式 Linux、AI Agent 和相关面试问答。Markdown 目录中的 `06-原始资料` 是历史来源快照，App 实际读取的是本目录的 JSONL。Markdown 编辑不会自动同步到运行时知识库。
+
+部分 `source_paths` 保留原始本机来源位置，用于追溯资料；检索使用 JSONL 中的正文，不要求其他电脑具有相同目录。
+
+上传源码不会改变安装包行为：当前打包配置仍排除真实 `interview_kb.jsonl`，安装版需要按下述路径单独配置。Obsidian 工作区状态、生成日志和真实问答测试报告不随本次知识库上传。
 
 ## 运行时地址
 
