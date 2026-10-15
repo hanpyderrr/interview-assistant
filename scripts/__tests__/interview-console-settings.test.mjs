@@ -64,10 +64,10 @@ test('interview session keeps the dedicated console visible', () => {
 });
 
 test('answer state changes cannot turn an active session back into a start action', () => {
-  assert.match(consoleSource, /const \[sessionActive, setSessionActive\] = useState\(false\)/);
-  assert.match(consoleSource, /const isLive = sessionActive/);
-  assert.match(consoleSource, /setSessionActive\(true\)[\s\S]*startMeeting/);
-  assert.match(consoleSource, /stopSession[\s\S]*setSessionActive\(false\)/);
+  assert.match(consoleSource, /const \[audioCaptureActive, setAudioCaptureActive\] = useState\(false\)/);
+  assert.match(consoleSource, /const isLive = audioCaptureActive/);
+  assert.match(consoleSource, /if \(manual\) \{ setStatus\('ready'\); return true \}[\s\S]*setAudioCaptureActive\(true\)[\s\S]*startMeeting/);
+  assert.match(consoleSource, /async function stopSession\(\)[\s\S]*setAudioCaptureActive\(false\)/);
 });
 
 test('main process ignores duplicate meeting starts', () => {
@@ -120,7 +120,7 @@ test('settings provider contract accepts Alibaba without rendering a new audio o
 test('interview answers keep their retrieved context out of generic V3 rerouting', () => {
   assert.match(
     consoleSource,
-    /streamGeminiChat\(prompt, undefined, context, \{ skipSystemPrompt: true, ignoreKnowledgeMode: true \}\)/,
+    /streamGeminiChat\(prompt, undefined, context, \{[\s\S]{0,240}skipSystemPrompt: true,[\s\S]{0,240}ignoreKnowledgeMode: true,[\s\S]{0,240}interviewQuestion: job\.analysisQuestion/,
   );
 });
 

@@ -1,0 +1,626 @@
+/* src/interview-console/InterviewRecordsPanel.css
+   Scoped styles for the 面试记录 panel. Every selector is prefixed with `irp-`
+   (or nested under `.irp-overlay`) so nothing here can collide with the rest of
+   the app. Light, white, readable; matches the interview-console palette
+   (cyan #087f6c, gold #966012, text #1e293b, muted #526277, line #dbe3e9). */
+
+.irp-overlay,
+.irp-overlay * {
+  box-sizing: border-box;
+}
+
+.irp-overlay {
+  -webkit-app-region: no-drag;
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(30, 41, 59, 0.38);
+  color-scheme: light;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.irp-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(1120px, 100%);
+  height: min(800px, calc(100vh - 40px));
+  overflow: hidden;
+  border: 1px solid #dbe3e9;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #1e293b;
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.24);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+
+.irp-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid #dbe3e9;
+  background: #ffffff;
+}
+
+.irp-kicker {
+  margin: 0 0 2px;
+  color: #087f6c;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.irp-title {
+  margin: 0;
+  font: 500 20px Georgia, "Microsoft YaHei", serif;
+  color: #1e293b;
+}
+
+.irp-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── Buttons ────────────────────────────────────────────────────────────── */
+
+.irp-button {
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1px solid #dbe3e9;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #43566d;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.irp-button:hover:not(:disabled) {
+  border-color: rgba(8, 127, 108, 0.4);
+  color: #174d40;
+  background: #f0f8f5;
+}
+
+.irp-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.irp-button-primary {
+  border-color: rgba(8, 127, 108, 0.45);
+  background: #087f6c;
+  color: #ffffff;
+}
+
+.irp-button-primary:hover:not(:disabled) {
+  background: #066b5b;
+  color: #ffffff;
+}
+
+.irp-button:focus-visible,
+.irp-select:focus-visible,
+.irp-textarea:focus-visible,
+.irp-list-item:focus-visible {
+  outline: 2px solid #087f6c;
+  outline-offset: 2px;
+}
+
+/* ── Body layout ────────────────────────────────────────────────────────── */
+
+.irp-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+}
+
+.irp-list {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px;
+  border-right: 1px solid #dbe3e9;
+  background: #fafbfc;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+
+.irp-list-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.irp-list-item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 11px;
+  border: 1px solid #dbe3e9;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #43566d;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.irp-list-item:hover {
+  border-color: rgba(8, 127, 108, 0.34);
+  color: #174d40;
+}
+
+.irp-list-item.is-selected {
+  border-color: rgba(8, 127, 108, 0.52);
+  background: #e4f3ee;
+  color: #1e293b;
+  box-shadow: inset 2px 0 0 #087f6c;
+}
+
+.irp-list-date {
+  color: #526277;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.irp-list-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e293b;
+  overflow-wrap: anywhere;
+}
+
+.irp-list-sub {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: #526277;
+  font-size: 10px;
+}
+
+.irp-list-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.irp-list-failed,
+.irp-status-error {
+  color: #b42318;
+}
+
+.irp-load-more {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0 4px;
+}
+
+/* ── Detail ─────────────────────────────────────────────────────────────── */
+
+.irp-detail-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 16px 20px 24px;
+  background: #ffffff;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+
+.irp-detail-head {
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid #dbe3e9;
+}
+
+.irp-detail-title {
+  margin: 0 0 6px;
+  font: 500 18px Georgia, "Microsoft YaHei", serif;
+  color: #1e293b;
+  overflow-wrap: anywhere;
+}
+
+.irp-detail-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.irp-detail-meta {
+  margin: 3px 0 0;
+  color: #526277;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.irp-export-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* ── Pills ──────────────────────────────────────────────────────────────── */
+
+.irp-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border: 1px solid #dbe3e9;
+  border-radius: 999px;
+  background: #f0f4f6;
+  color: #526277;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.irp-status-completed {
+  border-color: rgba(8, 127, 108, 0.35);
+  background: #e4f3ee;
+  color: #087f6c;
+}
+
+.irp-status-active {
+  border-color: rgba(8, 127, 108, 0.35);
+  background: #f0f8f5;
+  color: #087f6c;
+}
+
+.irp-status-interrupted,
+.irp-pill-partial {
+  border-color: rgba(150, 96, 18, 0.35);
+  background: #fff7e8;
+  color: #966012;
+}
+
+.irp-round-answered {
+  border-color: rgba(150, 96, 18, 0.3);
+  background: #fff7e8;
+  color: #966012;
+}
+
+.irp-round-error {
+  border-color: rgba(180, 35, 24, 0.32);
+  background: #fdeceb;
+  color: #b42318;
+}
+
+.irp-round-interrupted {
+  border-color: rgba(150, 96, 18, 0.3);
+  background: #fff7e8;
+  color: #966012;
+}
+
+.irp-round-pending {
+  border-color: rgba(8, 127, 108, 0.3);
+  background: #f0f8f5;
+  color: #087f6c;
+}
+
+.irp-round-needs-work {
+  border-color: rgba(150, 96, 18, 0.3);
+  background: #fff7e8;
+  color: #966012;
+}
+
+/* ── Round card ─────────────────────────────────────────────────────────── */
+
+.irp-round {
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  border: 1px solid #dbe3e9;
+  border-radius: 10px;
+  background: #fafbfc;
+}
+
+.irp-round-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.irp-round-index {
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.irp-round-time {
+  margin-left: auto;
+  color: #526277;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.irp-block {
+  margin-bottom: 10px;
+}
+
+.irp-block-label {
+  display: block;
+  margin-bottom: 4px;
+  color: #526277;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.irp-question {
+  margin: 0;
+  font: 500 15px/1.6 Georgia, "Microsoft YaHei", serif;
+  color: #1e293b;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.irp-answer-block {
+  padding: 10px 12px;
+  border: 1px solid rgba(8, 127, 108, 0.2);
+  border-radius: 8px;
+  background: #f0f8f5;
+}
+
+.irp-answer-block .irp-block-label {
+  color: #466457;
+}
+
+.irp-answer {
+  margin: 0;
+  color: #1e293b;
+  font-size: 14px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.irp-round-error-text {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(180, 35, 24, 0.24);
+  border-radius: 7px;
+  background: #fdeceb;
+  color: #b42318;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+/* ── Read-only metadata ─────────────────────────────────────────────────── */
+
+.irp-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 6px 14px;
+  margin: 0 0 10px;
+}
+
+.irp-meta-grid div {
+  min-width: 0;
+}
+
+.irp-meta-grid dt {
+  color: #526277;
+  font-size: 10px;
+}
+
+.irp-meta-grid dd {
+  margin: 1px 0 0;
+  color: #1e293b;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.irp-hit-list {
+  margin: 0;
+  padding-left: 18px;
+  color: #43566d;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.irp-hit-source {
+  margin-left: 6px;
+  color: #526277;
+  font-size: 10px;
+}
+
+/* ── Review controls ────────────────────────────────────────────────────── */
+
+.irp-review {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #dbe3e9;
+}
+
+.irp-review-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.irp-review-label {
+  color: #526277;
+  font-size: 11px;
+}
+
+.irp-review-current {
+  color: #526277;
+  font-size: 10px;
+}
+
+.irp-select,
+.irp-textarea {
+  border: 1px solid #dbe3e9;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #1e293b;
+  font: inherit;
+  font-size: 12px;
+}
+
+.irp-select {
+  min-height: 32px;
+  padding: 4px 8px;
+}
+
+.irp-select option {
+  color: #1e293b;
+  background: #ffffff;
+}
+
+.irp-textarea {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  margin: 4px 0 8px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.irp-review-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.irp-dirty-hint {
+  color: #966012;
+  font-size: 10px;
+}
+
+/* ── Candidate turns ────────────────────────────────────────────────────── */
+
+.irp-candidate-section {
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid #dbe3e9;
+  border-radius: 10px;
+  background: #fafbfc;
+}
+
+.irp-section-title {
+  margin: 0 0 4px;
+  font: 500 15px Georgia, "Microsoft YaHei", serif;
+  color: #1e293b;
+}
+
+.irp-turn-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.irp-turn {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #dbe3e9;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.irp-turn-time {
+  color: #526277;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.irp-turn-text {
+  color: #1e293b;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── Text helpers ───────────────────────────────────────────────────────── */
+
+.irp-hint {
+  margin: 4px 0 0;
+  color: #526277;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.irp-empty {
+  margin: 0;
+  padding: 24px 4px;
+  color: #526277;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.irp-empty-inline {
+  margin: 0;
+  color: #526277;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* ── Footer / status ────────────────────────────────────────────────────── */
+
+.irp-footer {
+  flex: none;
+  min-height: 38px;
+  padding: 9px 20px;
+  border-top: 1px solid #dbe3e9;
+  background: #fafbfc;
+}
+
+.irp-status-text {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.irp-status-info {
+  color: #526277;
+}
+
+.irp-status-success {
+  color: #087f6c;
+}
+
+/* ── Responsive ─────────────────────────────────────────────────────────── */
+
+@media (max-width: 860px) {
+  .irp-overlay {
+    padding: 10px;
+  }
+
+  .irp-panel {
+    height: calc(100vh - 20px);
+  }
+
+  .irp-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(140px, 34%) minmax(0, 1fr);
+  }
+
+  .irp-list {
+    border-right: 0;
+    border-bottom: 1px solid #dbe3e9;
+  }
+}
+
+.interview-console .record-history-button { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }

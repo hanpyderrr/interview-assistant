@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { interviewProviderDeadlineMs } from '../latencyTelemetry.ts';
 import { createProviderDeadlineController } from '../providerDeadlineController.ts';
 
 function createFakeTimers() {
@@ -138,4 +139,16 @@ test('two queued generations can each release once after timeout', () => {
   controller.start(8);
   timers.advance(100);
   assert.deepEqual(released, [7, 8]);
+});
+
+ test('ChatGPT buffered project answers get 20s, other providers retain 7s', () => {
+  assert.equal(interviewProviderDeadlineMs('codex-cli:gpt-6.1-sol'), 20000);
+  assert.equal(interviewProviderDeadlineMs('codex-cli'), 20000);
+  assert.equal(interviewProviderDeadlineMs('deepseek-chat'), 7000);
+  const timers = createFakeTimers(); const expired=[];
+  const c=createProviderDeadlineController({setTimeout:timers.setTimeout,clearTimeout:timers.clearTimeout,onTimeout:id=>expired.push(id)});
+  c.start(1,interviewProviderDeadlineMs('codex-cli:gpt-6.1-sol'));
+  timers.advance(7001);assert.deepEqual(expired,[]);assert.equal(c.snapshot().state,'pending');
+  assert.equal(c.observeToken(1,'完整回答'),true);timers.advance(20000);assert.deepEqual(expired,[]);
+  c.start(2,interviewProviderDeadlineMs('deepseek-chat'));timers.advance(7000);assert.deepEqual(expired,[2]);
 });

@@ -4,6 +4,7 @@
  */
 
 import { app, safeStorage } from 'electron';
+import type { CodexOAuthTokens, ChatGPTRegistration } from './CodexOAuthService';
 import fs from 'fs';
 import path from 'path';
 import * as crypto from 'crypto';
@@ -131,32 +132,10 @@ export interface StoredCredentials {
      * (Field name retained for backward-compat with already-persisted credentials.)
      */
     phoneMirrorToken?: string;
-    /**
-     * ChatGPT Codex OAuth tokens. Persisted (encrypted via safeStorage) so the
-     * user only signs in once per device. Written by CodexOAuthService on a
-     * successful PKCE callback+exchange and on each refresh-token rotation;
-     * cleared on signOut or on permanent refresh failure (invalid_grant).
-     * Shape: { accessToken, refreshToken, idToken?, expiresAt, email?, accountId? }.
-     */
-    codexOAuthTokens?: {
-        accessToken: string;
-        refreshToken: string;
-        idToken?: string;
-        expiresAt: number;
-        email?: string;
-        accountId?: string;
-        /**
-         * Epoch ms of the last successful token exchange (initial login OR
-         * refresh). Used by the 8-day proactive re-auth check: OpenAI may
-         * silently invalidate refresh tokens that have been aging in storage
-         * for too long, and the result is a sudden `invalid_grant` mid-use.
-         * Tracking the last-exchange time lets us clear credentials and
-         * prompt the user to re-auth BEFORE the user hits a broken call.
-         * Mirrors open-sse `trackRefreshAt: true` + `maxRefreshAgeMs:
-         * 691200000` (8 days) at codex.md:1167 / 1329.
-         */
-        lastRefreshAt?: number;
-    };
+    codexOAuthTokens?: CodexOAuthTokens;
+    chatGPTRegistration?: ChatGPTRegistration;
+    chatGPTHostId?: string;
+
 }
 
 export class CredentialsManager {
@@ -283,22 +262,52 @@ export class CredentialsManager {
      * to refresh-and-retry on a 401 from the Codex API. Returns a defensive deep
      * copy so callers can't mutate the stored bundle by accident.
      */
-    public getCodexOAuthTokens(): { accessToken: string; refreshToken: string; idToken?: string; expiresAt: number; email?: string; accountId?: string; lastRefreshAt?: number } | null {
+    public getCodexOAuthTokens(): CodexOAuthTokens | null {
         const t = this.credentials.codexOAuthTokens;
-        if (!t || typeof t.accessToken !== 'string' || typeof t.refreshToken !== 'string') return null;
-        return { ...t };
+        return t ? { ...t, scopes: t.scopes ? [...t.scopes] : undefined } : null;
     }
 
-    public setCodexOAuthTokens(tokens: { accessToken: string; refreshToken: string; idToken?: string; expiresAt: number; email?: string; accountId?: string; lastRefreshAt?: number }): void {
-        this.credentials.codexOAuthTokens = { ...tokens };
-        this.saveCredentials();
-        console.log('[CredentialsManager] Codex OAuth tokens updated');
+    public getChatGPTRegistration(): ChatGPTRegistration | null {
+        const r = this.credentials.chatGPTRegistration;
+        return r ? { ...r } : null;
+    }
+
+    public setChatGPTRegistration(registration: ChatGPTRegistration): void {
+        const previous = this.credentials.chatGPTRegistration;
+        this.credentials.chatGPTRegistration = { ...registration };
+        if (!this.saveCredentials()) {
+            this.credentials.chatGPTRegistration = previous;
+            throw new Error('无法保存 ChatGPT 注册，请检查存储权限。');
+        }
+    }
+
+    public getChatGPTHostId(): string {
+        if (this.credentials.chatGPTHostId) return this.credentials.chatGPTHostId;
+        this.credentials.chatGPTHostId = `urn:uuid:${crypto.randomUUID()}`;
+        if (!this.saveCredentials()) {
+            this.credentials.chatGPTHostId = undefined;
+            throw new Error('无法保存 ChatGPT 设备标识，请检查存储权限。');
+        }
+        return this.credentials.chatGPTHostId;
+    }
+
+    public setCodexOAuthTokens(tokens: CodexOAuthTokens): void {
+        const previous = this.credentials.codexOAuthTokens;
+        const registration = this.credentials.chatGPTRegistration;
+        this.credentials.codexOAuthTokens = { ...tokens, scopes: tokens.scopes ? [...tokens.scopes] : undefined };
+        if (tokens.clientId && tokens.subject && tokens.issuer) {
+            this.credentials.chatGPTRegistration = { clientId: tokens.clientId, subject: tokens.subject, issuer: tokens.issuer, email: tokens.email };
+        }
+        if (!this.saveCredentials()) {
+            this.credentials.codexOAuthTokens = previous;
+            this.credentials.chatGPTRegistration = registration;
+            throw new Error('无法保存 ChatGPT 登录，请检查存储权限后重试。');
+        }
     }
 
     public clearCodexOAuthTokens(): void {
         this.credentials.codexOAuthTokens = undefined;
-        this.saveCredentials();
-        console.log('[CredentialsManager] Codex OAuth tokens cleared');
+        if (!this.saveCredentials()) throw new Error('无法清除保存的 ChatGPT 登录，请检查存储权限。');
     }
 
     public getLitellmApiKey(): string | undefined {
@@ -1025,7 +1034,7 @@ export class CredentialsManager {
                 const data = JSON.stringify(this.credentials);
                 const encrypted = safeStorage.encryptString(data);
                 const tmpEnc = credentialsPath + '.tmp';
-                fs.writeFileSync(tmpEnc, encrypted);
+                fs.writeFileSync(tmpEnc, encrypted, { mode: 0o600 });
                 fs.renameSync(tmpEnc, credentialsPath);
                 // Keyring is the source of truth now — drop any stale fallback file.
                 this.removeFallbackFile();

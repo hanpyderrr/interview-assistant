@@ -112,11 +112,39 @@ function isExcessivelyRepetitive(value: string): boolean {
   return false
 }
 
+// Reject recognizer fillers independently of whether a real question preceded them.
+function isNonQuestionSound(text: string): boolean {
+  const compact = compactSemanticText(normalizeInterviewQuestion(text)).toLowerCase()
+  return !compact
+    || /^(?:叮|咚|滴|嘀|哔|铃|噔|咳|嗯|啊|哦|呃|额|唔|诶|哈|好|的|对|是)+$/.test(compact)
+    || /^(?:hello|hi|hey|ok|okay|thanks|thankyou|你好|您好|谢谢|音乐|掌声|静音|提示音|系统提示音|铃声|咳嗽|噪音|噪声|silence|music|noise)$/.test(compact)
+    || isExcessivelyRepetitive(compact)
+}
+
+/** Readiness is separate from accepting a fragment into the pending round. */
+export function isAnswerableInterviewQuestion(value: string, hasPreviousQuestion = false): boolean {
+  const text = normalizeInterviewQuestion(value)
+  if (isNonQuestionSound(text)) return false
+  const compact = compactSemanticText(text).toLowerCase()
+  if (/^(?:为什么|为何|怎么呢|具体呢|然后呢|还有呢|再说一下|继续|why|howso|elaborate)$/.test(compact)) return hasPreviousQuestion
+  // A spoken clause may contain a question word before its missing object.
+  if (/(?:你会|您会|我们会|怎么|如何|是否|有没有|能不能|如果|如果我们|如果我们的|以及|还有|那么|的一)[，。？！,.?!\s]*$/.test(text)) return false
+  if (/(?:如果|假如)[^。？！?!]{0,12}(?:那个|这个|我们|的话|的)[，。？！,.?!\s]*$/.test(text)) return false
+  // Announcements/lectures are context, unless they actually invite a response.
+  const request = /请(?:你|您)?(?:用[^。？?]{0,20})?(?:简单|简要)?(?:介绍|说|讲|解释|分析)|介绍(?:一下)?(?:你|您|自己)|聊(?:一下|一聊)|谈谈|说说|讲讲|(?:介绍|讲|说|谈|分析|解释|描述|比较|总结|对比)一下|简述|概述|\b(?:describe|explain|compare|tell me|introduce yourself|walk me through)\b/i
+  if (request.test(text)) return true
+  if (/上节课|下节课|这节课|欢迎(?:参加|参与|来到)|倒计时|监考|开始作答|进入面试/.test(text)
+    && !/(?:你|您|请)[^。？?]{0,30}(?:怎么|如何|什么|介绍|说说)/.test(text)) return false
+  return /什么|怎么|怎样|如何|为何|为什么|哪些|哪个|哪种|多少|是否|能不能|会不会|有没有|优缺点|区别|原理|吗[？?。.!！\s]*$|呢[？?。.!！\s]*$|累不累|难不难|\b(?:what|why|how|when|where|which|who)\b/i.test(text)
+    || (/[?？]$/.test(text) && compact.length > 3)
+}
+
 function shouldIgnoreLowInformationTail(
   currentTurns: InterviewTurn[],
   incoming: Partial<InterviewTurn>,
   recentSettledQuestion = '',
 ): boolean {
+  if (isNonQuestionSound(cleanQuestionText(incoming.text))) return true
   const currentQuestion = joinTranscriptTurns(currentTurns)
   const referenceQuestion = currentQuestion || recentSettledQuestion
   const normalizedReference = normalizeInterviewQuestion(referenceQuestion)

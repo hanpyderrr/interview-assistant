@@ -87,6 +87,17 @@ npm run app:build             # 构建
 npm run dist                  # 生成安装包（electron-builder）
 ```
 
+**macOS 本机自用，更新时保持固定签名**：
+
+```sh
+npm run setup:local-signing   # 首次配置；重复运行会复用同一证书
+npm run app:build:local      # 构建当前 Mac 架构的 App
+```
+
+退出 Natively 后，用 `release/mac-arm64/Natively.app`（Apple Silicon）或 `release/mac/Natively.app`（Intel）替换 `/Applications/Natively.app`，再打开。首次从临时签名切换到固定证书时，可能需要在 macOS 中重新授权一次屏幕录制、系统音频和麦克风；以后保持证书、应用标识和安装路径一致。该签名用于本机自用，不提供 Developer ID 公证。
+
+证书私钥保存在当前用户的登录钥匙串，公共配置保存在 `~/Library/Application Support/Natively Local Signing/`。请保留它们；证书不可用时构建会报错，不会自动换成临时签名。迁移电脑时需要单独恢复签名身份，重新生成证书会改变应用身份。已有 Developer ID 正式发布配置继续使用原来的发布流程。
+
 ## ⚙️ 配置
 
 复制 `.env.example` 为 `.env`，按需填写（Key 仅存本机，不上传）：

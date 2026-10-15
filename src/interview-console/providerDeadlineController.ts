@@ -5,11 +5,11 @@ export type ProviderDeadlineState = 'idle' | 'pending' | 'streaming' | 'done' | 
 type TimerHandle = ReturnType<typeof setTimeout>
 
 export type ProviderDeadlineController = {
-  start: (generationId: number) => void
+  start: (generationId: number, deadlineMs?: number) => void
   observeToken: (generationId: number, token: string) => boolean
   complete: (generationId: number, outcome?: 'done' | 'error') => boolean
   clear: () => void
-  snapshot: () => { generationId: number | null; state: ProviderDeadlineState; usefulText: string }
+  snapshot: () => { generationId: number | null; state: ProviderDeadlineState; usefulText: string; deadlineMs: number }
 }
 
 export function createProviderDeadlineController(options: {
@@ -26,6 +26,7 @@ export function createProviderDeadlineController(options: {
   let generationId: number | null = null
   let state: ProviderDeadlineState = 'idle'
   let usefulText = ''
+  let activeDeadlineMs = deadlineMs
 
   function clearTimer(): void {
     if (timer !== null) cancel(timer)
@@ -40,17 +41,18 @@ export function createProviderDeadlineController(options: {
     usefulText = ''
   }
 
-  function start(nextGenerationId: number): void {
+  function start(nextGenerationId: number, timeoutMs = deadlineMs): void {
     clear()
     generationId = nextGenerationId
     state = 'pending'
+    activeDeadlineMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : deadlineMs
     const scheduledEpoch = epoch
     timer = schedule(() => {
       if (scheduledEpoch !== epoch || generationId !== nextGenerationId || state !== 'pending') return
       timer = null
       state = 'timeout'
       options.onTimeout?.(nextGenerationId)
-    }, deadlineMs)
+    }, activeDeadlineMs)
   }
 
   function observeToken(nextGenerationId: number, token: string): boolean {
@@ -75,6 +77,6 @@ export function createProviderDeadlineController(options: {
     observeToken,
     complete,
     clear,
-    snapshot: () => ({ generationId, state, usefulText }),
+    snapshot: () => ({ generationId, state, usefulText, deadlineMs: activeDeadlineMs }),
   }
 }

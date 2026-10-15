@@ -174,7 +174,7 @@ test('enqueue defaults to student and revise preserves the answer-level snapshot
   assert.equal(defaultState.items[0].answerLevel, 'student');
 });
 
-test('local fallback wording follows the answer-level snapshot', () => {
+test('missing evidence does not manufacture role-specific answers at any level', () => {
   const answers = {};
   for (const answerLevel of ['student', 'mid', 'senior']) {
     let state = createAnswerHistoryState(10);
@@ -182,11 +182,21 @@ test('local fallback wording follows the answer-level snapshot', () => {
       type: 'enqueue', id: 1, question: '怎么设计 RAG？', answerLevel,
     });
     state = answerHistoryReducer(state, { type: 'error', id: 1, error: 'offline' });
+    assert.equal(state.items[0].answerLevel, answerLevel);
+    assert.equal(state.items[0].answerSource, 'unavailable');
     answers[answerLevel] = state.items[0].answer;
   }
 
-  assert.match(answers.student, /我的理解|学习|个人项目/);
-  assert.match(answers.mid, /实现|排查|取舍/);
-  assert.match(answers.senior, /架构|可靠性|容量|约束/);
-  assert.equal(new Set(Object.values(answers)).size, 3);
+  for (const answer of Object.values(answers)) {
+    assert.match(answer, /暂无可靠/);
+    assert.doesNotMatch(answer, /我的理解|架构|工程师/);
+  }
+  assert.equal(new Set(Object.values(answers)).size, 1);
+});
+
+test('local project guidance is not labeled as a model answer', () => {
+ let state=createAnswerHistoryState();
+ state=answerHistoryReducer(state,{type:'enqueue',id:901,question:'项目难题？'});
+ state=answerHistoryReducer(state,{type:'done',id:901,finalText:'请明确主讲项目。',source:'guidance'});
+ assert.equal(state.items[0].answerSource,'guidance');
 });

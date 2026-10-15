@@ -169,11 +169,21 @@ exports.default = async function (context) {
         process.env.CSC_NAME ||
         process.env.NATIVELY_SIGN_IDENTITY
     );
+    if (hasRealIdentity && process.env.NATIVELY_LOCAL_SIGNING_REQUIRED === '1') {
+        throw new Error('Local signing requested with production signing variables set. Choose one signing mode.');
+    }
     if (hasRealIdentity) {
         console.log(
             '[Ad-Hoc Signing] Developer ID identity detected (CSC_LINK/CSC_NAME/NATIVELY_SIGN_IDENTITY) — ' +
             'skipping ad-hoc signing. electron-builder will sign with Developer ID; afterSign will notarize.'
         );
+        return;
+    }
+
+    const { loadLocalSigningConfig, signLocalApp } = require('./local-mac-signing.cjs');
+    const localSigning = loadLocalSigningConfig({ required: process.env.NATIVELY_LOCAL_SIGNING_REQUIRED === '1' });
+    if (localSigning) {
+        await signLocalApp(appPath, context.packager.info.projectDir, localSigning);
         return;
     }
 

@@ -32,13 +32,15 @@ test('microphone finals enter context but cannot trigger answer generation', () 
   assert.doesNotMatch(consoleSource, /event\.speaker === 'user'[\s\S]{0,500}requestCloudAnswer/);
 });
 
-test('candidate context preference only gates AI context and is available in the main controls', () => {
+test('candidate context preference controls microphone capture and AI context', () => {
   assert.match(consoleSource, /loadCandidateContextEnabled/);
   assert.match(consoleSource, /saveCandidateContextEnabled/);
   assert.match(consoleSource, /includeCandidateSpeech:\s*candidateContextEnabledRef\.current/);
-  assert.match(consoleSource, /type="checkbox"[\s\S]{0,300}checked=\{candidateContextEnabled\}/);
-  assert.match(consoleSource, /我的发言供 AI 参考/);
-  assert.match(consoleSource, /关闭后仍会转写和记录/);
+  assert.match(consoleSource, /type="checkbox"[\s\S]{0,300}checked=\{source === 'system' && candidateContextEnabled\}/);
+  assert.match(consoleSource, /采集我的回答并供 AI 参考/);
+  assert.match(consoleSource, /关闭停止采集我的回答/);
+  assert.match(consoleSource, /setCandidateCaptureEnabled/);
+  assert.match(consoleSource, /if \(!candidateContextEnabledRef\.current\) return/);
   assert.match(consoleSource, /committedCandidateRef\.current = appendFinalTurn/);
   assert.match(consoleSource, /acceptCandidateFinal/);
 });
@@ -51,7 +53,7 @@ test('candidate cleanup is isolated from raw transcript state and bounded before
   assert.match(consoleSource, /buildContextTurns\(\s*conversationTurnsRef\.current,\s*candidateContextEnabledRef\.current,\s*300,?\s*\)/);
   assert.match(consoleSource, /answerPreparationVersionRef/);
   assert.match(consoleSource, /AI 整理中|AI 已整理|AI 使用原文/);
-  assert.match(consoleSource, /发言片段会调用当前 AI 服务整理/);
+  assert.match(consoleSource, /采集我的回答并供 AI 参考/);
   assert.match(consoleSource, /candidateCleanupRef\.current\??\.cancel\(\)/);
   assert.match(consoleSource, /committedCandidateRef\.current = appendFinalTurn/);
   assert.match(consoleSource, /acceptCandidateFinal/);
@@ -76,20 +78,22 @@ test('answer requests include bounded conversation context while retrieval and p
   assert.match(consoleSource, /buildRecentInterviewContext\(conversationTurnsRef\.current,[\s\S]{0,180}includeCandidateSpeech/);
   assert.match(consoleSource, /import \{ normalizeInterviewQuestion \} from '\.\/questionNormalization'/);
   assert.match(consoleSource, /analysisQuestion: normalizeInterviewQuestion\(question\)/);
-  assert.match(consoleSource, /buildInterviewConsolePrompt\(job\.analysisQuestion, context, job\.conversationContext, job\.answerLevel\)/);
-  assert.match(consoleSource, /retrieveInterviewKnowledge\?\.\(job\.analysisQuestion\)/);
+  assert.match(consoleSource, /buildInterviewConsolePrompt\(job\.analysisQuestion, context, job\.conversationContext, job\.answerLevel, job\.englishMode, job\.customInstructions, job\.profile, job\.scope\)/);
+  assert.match(consoleSource, /answerPrewarmRef\.current\.retrieve\(job\.analysisQuestion, job\.scope\)/);
 });
 
 test('prewarms the latest normalized question and consumes matching retrieval work', () => {
   assert.match(consoleSource, /createAnswerPrewarmCache/);
   assert.match(consoleSource, /answerPrewarmRef\.current\.prewarm/);
-  assert.match(consoleSource, /answerPrewarmRef\.current\.consume\(job\.analysisQuestion, job\.conversationContext, job\.answerLevel\)/);
+  assert.match(consoleSource, /answerPrewarmRef\.current\.consume\(job\.analysisQuestion, job\.conversationContext, job\.answerLevel, job\.englishMode, job\.customInstructions, job\.profile, job\.currentProjects\)/);
 });
 
-test('simplified display question is stored for answer history and UI selection', () => {
+test('audio display uses simplified questions while manual text and record snapshots are preserved', () => {
   assert.match(consoleSource, /const question = toSimplifiedChinese\(action\.question\)/);
+  assert.match(consoleSource, /const effectiveQuestion = manual \? action\.question : question/);
+  assert.match(consoleSource, /enqueueAnswer\(action\.answerId, effectiveQuestion, job\)/);
   assert.match(consoleSource, /dispatchAnswer\(\{ type: 'enqueue', id, question/);
-  assert.match(consoleSource, /dispatchAnswer\(\{ type: 'enqueue', id, question, select, answerLevel: job\.answerLevel \}\)/);
+  assert.match(consoleSource, /dispatchAnswer\(\{ type: 'enqueue', id, question, select, answerLevel: job\.answerLevel, englishMode: job\.englishMode \}, \{ model: modelSnapshotRef\.current, profile: job\.profile, scope: job\.scope \}\)/);
 });
 
 // Phase 18 Step 5: the renderer now uses one answer/history row per coordinator
@@ -114,4 +118,19 @@ test('the transcript panel visibly distinguishes interviewer and candidate speec
   assert.match(consoleSource, />我的回答</);
   assert.match(consoleSource, /className="candidate-transcript/);
   assert.match(stylesSource, /\.candidate-transcript\{/);
+});
+
+test('optional knowledge retrieval failures do not abort online answer generation', () => {
+  const failureBranch = consoleSource.split('if (retrieval && !retrieval.success) {')[1].split('\n      }')[0];
+  assert.match(failureBranch, /setError\(/);
+  assert.doesNotMatch(failureBranch, /dispatchAnswer|active\.settled|return/);
+  assert.match(consoleSource, /retrieval\?\.success \? retrieval.context : undefined/);
+});
+
+test('personal and behavioral questions bypass the untyped technical knowledge base', () => {
+  const prewarmSource = fs.readFileSync(path.join(repoRoot, 'src/interview-console/answerPrewarm.ts'), 'utf8');
+  assert.match(prewarmSource, /classifyInterviewQuestion\(normalized\)/);
+  assert.match(prewarmSource, /allowTechnicalEvidence/);
+  assert.match(prewarmSource, /matches:\s*\[\]/);
+  assert.match(consoleSource, /answerPrewarmRef\.current\.retrieve\(job\.analysisQuestion, job\.scope\)/);
 });

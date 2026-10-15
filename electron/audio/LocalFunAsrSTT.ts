@@ -248,7 +248,6 @@ export class LocalFunAsrSTT extends EventEmitter {
                 this.emit('transcript', {
                     text,
                     isFinal: true,
-                    confidence: 0.9,
                     segmentId,
                     audioStartMs: utterance.firstChunk.captureStartMs,
                     audioEndMs: utterance.lastChunk.captureEndMs,

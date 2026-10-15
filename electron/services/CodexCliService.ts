@@ -1,25 +1,26 @@
 /**
- * CodexCliService — direct HTTPS ChatGPT Codex provider (replaces subprocess)
+ * CodexCliService — direct HTTPS ChatGPT-plan provider (replaces subprocess)
  *
- * History: the previous implementation spawned the `codex` CLI as a child
- * process and parsed its NDJSON event stream. This had two persistent
- * failure modes that drove the rewrite:
- *   1. Users without the @openai/codex binary (or with a stale one) hit
- *      ENOENT every chat. The auto-detect fallback covered common install
- *      locations but not, e.g., `nix run` or non-PATH installs.
- *   2. The CLI is a Rust binary that cold-loads the model on first
- *      invocation, so the first delta could take 5-8s and the subprocess
- *      IPC overhead added more. The 60s default timeout saved us from
- *      the most catastrophic hangs but the user-visible behavior was still
- *      "sometimes it works, sometimes it doesn't".
+ * This service implements the official "Sign in with ChatGPT" flow documented
+ * in .planning/2026-10-15-chatgpt-login/models-and-inference.md:
  *
- * The new design drops the subprocess entirely. We use ChatGPT OAuth
- * (see CodexOAuthService) to mint a bearer token, then call
- * `https://api.openai.com/v1/responses` directly with `fetch()` and
- * `ReadableStream` SSE. This is the same endpoint the open-sse
- * `CodexExecutor` calls (codex.md:1113 — `baseUrl: https://chatgpt.com/backend-api/codex/responses`),
- * adapted to Electron's Node runtime and pinned to the OpenAI-hosted
- * `/v1/responses` route that all ChatGPT-account bearer tokens accept.
+ *   - Model catalog: GET https://api.openai.com/v1/models with the OAuth
+ *     bearer token; keep `visibility === "list"`, preserve order, map
+ *     slug -> id and display_name -> label (see listModels()).
+ *   - Inference: POST https://api.openai.com/v1/responses with the same
+ *     bearer token, `stream: true` and `store: false`, consumed as SSE.
+ *
+ * History: this replaces a subprocess implementation that spawned the
+ * `codex` CLI and parsed its NDJSON event stream (ENOENT for users without
+ * the binary; 5-8s cold model load on first invocation). The subprocess is
+ * gone; we call the public Responses API directly with `fetch()` and
+ * `ReadableStream` SSE.
+ *
+ * IMPORTANT — this is the PUBLIC api.openai.com surface, NOT ChatGPT's
+ * `backend-api` routes. We deliberately do NOT impersonate the Codex CLI:
+ * no `originator`, `chatgpt-account-id`, or `session_id` headers. Request
+ * headers are limited to normal HTTP auth/content negotiation
+ * (Authorization / Content-Type / Accept).
  *
  * Public surface preserved for backward compatibility:
  *   - DEFAULT_CODEX_CLI_CONFIG (shape unchanged)
@@ -28,18 +29,29 @@
  *   - CodexCliService.buildArgs (DEPRECATED — returns [] but kept so the
  *     few tests that import it don't break; new code should not call it)
  *   - resolveCodexReasoningEffort (unchanged, per-model VALID set)
+ *   - CodexCliService.listModels (NEW — account-specific catalog)
  *
- * Wire-level differences from the old subprocess design:
- *   - Bearer token is read from CodexOAuthService (not argv)
- *   - Reasoning effort goes in `body.reasoning.effort` (not -c flag)
- *   - `service_tier` goes in `body.service_tier` (not -c flag)
- *   - 401 → refresh-once-and-retry (matches open-sse chatCore:844-863)
- *   - 429 / 5xx → exponential backoff with jitter (up to 3 attempts)
+ * Success contract (see models-and-inference.md §3): a stream is successful
+ * ONLY after `response.completed`. `response.failed` (including
+ * `subscription_sharing_usage_limit_exceeded` /
+ * `subscription_sharing_usage_unavailable`), `response.incomplete`, explicit
+ * `error` events, `[DONE]`-only, and a bare EOF are all failures. Text
+ * already yielded to the caller is preserved; once visible text has been
+ * yielded, a later failure is surfaced and is NEVER retried or replayed.
+ * Network retries only ever happen before the first visible delta.
+ *
+ *   - Bearer token is read from CodexOAuthService.getAccessToken()
+ *   - Reasoning effort goes in `body.reasoning.effort`
+ *   - `service_tier` goes in `body.service_tier`
+ *   - 401 → refresh-once-and-retry
+ *   - 429 / 5xx / network → exponential backoff with jitter (up to 3
+ *     attempts), only before any visible text is yielded
  *   - AbortSignal cancels the in-flight fetch and propagates to the
  *     stream consumer; partial deltas yielded so far are NOT lost.
  */
 
 import { CodexOAuthService } from './CodexOAuthService';
+import { chatGPTFetch } from './ChatGPTTransport';
 
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 export type CodexServiceTier = 'default' | 'fast' | 'flex';
@@ -177,30 +189,42 @@ export const DEFAULT_CODEX_CLI_CONFIG: CodexCliConfig = {
   modelReasoningEffort: undefined,
 };
 
-// Codex backend endpoint. ChatGPT-subscription OAuth bearer tokens issued by
-// `https://auth.openai.com/oauth/token` are routed to ChatGPT's own backend,
-// not the public `api.openai.com` host — the open-sse reference (and the
-// official `codex_cli_rs` binary) hit `chatgpt.com/backend-api/codex/responses`.
-// Using `api.openai.com/v1/responses` here would 401 with a ChatGPT OAuth
-// token, defeating the entire "no API key, just ChatGPT subscription" path.
-// See codex.md:1113 (`baseUrl` in open-sse/providers/registry/codex.js) and
-// codex.md:1149-1169 for the OAuth constants that map to this endpoint.
-const CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses';
+// Official ChatGPT-plan inference endpoint. This is the PUBLIC Responses API
+// surface the "Sign in with ChatGPT" documentation instructs us to call with
+// the OAuth access token as a normal Bearer credential — NOT ChatGPT's
+// `backend-api` routes and NOT the Codex CLI endpoint.
+const CODEX_RESPONSES_URL = 'https://api.openai.com/v1/responses';
 
-// Retry policy for transient upstream failures. Matches the open-sse
-// chatCore 401-refresh (codex.md:844-863) and the 503-retry default in
-// DEFAULT_RETRY_CONFIG (codex.md:283-317).
+// Official model-catalog endpoint for the signed-in ChatGPT account.
+const CODEX_MODELS_URL = 'https://api.openai.com/v1/models';
+const CODEX_MODELS_TIMEOUT_MS = 20_000;
+
+// Retry policy for transient upstream failures (network / 429 / 5xx). Retries
+// are ONLY permitted before the first visible delta is yielded.
 const TRANSIENT_RETRY_MAX = 3;
 const TRANSIENT_RETRY_BASE_MS = 500;
 const TRANSIENT_RETRY_CAP_MS = 8_000;
 
-// Sentinel thrown from parseSseStream when the SSE body carries a transient
-// error (e.g. "servers are currently overloaded"). fetchDeltas catches this
-// and retries with backoff instead of surfacing it to the caller.
-class TransientStreamError extends Error {
-  readonly isTransient = true;
-  constructor(message: string) {
+// Error surfaced from the SSE parser for a terminal failure. `code` carries the
+// upstream error code when the payload provides one (e.g.
+// `subscription_sharing_usage_limit_exceeded`). Non-transient by default:
+// `response.failed` / `response.incomplete` must never be retried.
+class CodexStreamError extends Error {
+  readonly code?: string;
+  constructor(message: string, code?: string) {
     super(message);
+    this.name = 'CodexStreamError';
+    this.code = code;
+  }
+}
+
+// Transient sentinel reserved for explicit mid-stream `error` events whose
+// message is a retryable overload signal (e.g. "servers are currently
+// overloaded"). fetchDeltas only retries these BEFORE any visible delta.
+class TransientStreamError extends CodexStreamError {
+  readonly isTransient = true;
+  constructor(message: string, code?: string) {
+    super(message, code);
     this.name = 'TransientStreamError';
   }
 }
@@ -208,6 +232,43 @@ class TransientStreamError extends Error {
 function isTransientStreamMessage(msg: string): boolean {
   const lower = msg.toLowerCase();
   return lower.includes('overloaded') || lower.includes('try again') || lower.includes('service unavailable') || lower.includes('capacity');
+}
+
+// Usage-limit / sharing codes are hard account-level failures. Even when the
+// message text looks transient we must surface them, never retry them.
+function isQuotaOrSharingCode(code?: string): boolean {
+  if (!code) return false;
+  return code === 'subscription_sharing_usage_limit_exceeded'
+    || code === 'subscription_sharing_usage_unavailable'
+    || /subscription_sharing/.test(code);
+}
+
+/**
+ * Strip anything credential-shaped from an upstream error message before it
+ * reaches a user-visible surface. We never echo raw response bodies, so this
+ * is a defensive backstop for messages the backend embeds itself.
+ */
+function sanitizeErrorMessage(message: string): string {
+  if (!message) return '';
+  return truncate(
+    message
+      .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [redacted]')
+      .replace(/\b(?:sk|sess|eyJ)[A-Za-z0-9._-]{12,}\b/g, '[redacted]'),
+    500,
+  );
+}
+
+/**
+ * Mutable per-response state threaded from fetchDeltas into parseSseStream.
+ * `private` on the parser would be erased anyway; an explicit out-param keeps
+ * the completion contract observable without relying on a generator's return
+ * value (which `for await` discards).
+ */
+interface SseStreamState {
+  /** True only after a `response.completed` event. */
+  completed: boolean;
+  /** Set when a `response.incomplete` terminal event arrives. */
+  incomplete: { reason?: string; code?: string } | null;
 }
 
 // =============================================================================
@@ -271,6 +332,98 @@ export class CodexCliService {
       serviceTier,
       modelReasoningEffort,
     };
+  }
+
+  /**
+   * List the ChatGPT account's available models for the model picker.
+   *
+   * Official contract (models-and-inference.md §1): GET /v1/models with the
+   * same OAuth bearer token used for inference, keep entries whose
+   * `visibility === "list"`, preserve the server's ordering, and expose
+   * `display_name` to the UI while passing `slug` as the `model` on the next
+   * request. Refreshed by the caller when the user switches accounts.
+   *
+   * Bounded by a 20s timeout. Errors are safe: they never include the access
+   * token or any raw response body.
+   */
+  public static async listModels(): Promise<Array<{ id: string; label: string }>> {
+    const oauth = CodexOAuthService.getInstance();
+    const status = oauth.getStatus();
+    if (!status.signedIn) {
+      throw new Error('Not signed in to ChatGPT. Please complete Codex OAuth login from Settings → AI Providers.');
+    }
+
+    const controller = new AbortController();
+    const timer: ReturnType<typeof setTimeout> = setTimeout(() => controller.abort(), CODEX_MODELS_TIMEOUT_MS);
+
+    const request = async (): Promise<Response> => {
+      const accessToken = await this.getFreshAccessToken();
+      return chatGPTFetch(CODEX_MODELS_URL, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json',
+        },
+        signal: controller.signal,
+      });
+    };
+
+    try {
+      let response = await request();
+      if (response.status === 401) {
+        // Force-refresh once, then retry once with the freshest token.
+        const refreshed = await oauth.refreshTokens();
+        if (!refreshed || !refreshed.accessToken) {
+          throw new Error('ChatGPT session expired. Please sign in again from Settings → AI Providers.');
+        }
+        response = await request();
+      }
+      if (!response.ok) {
+        // Deliberately do NOT read or echo the response body — it may contain
+        // account-scoped detail. The status code is the safe diagnostic.
+        throw new Error(`ChatGPT model catalog request failed (HTTP ${response.status}).`);
+      }
+
+      let payload: any;
+      try {
+        payload = await response.json();
+      } catch {
+        throw new Error('ChatGPT model catalog response was not valid JSON.');
+      }
+      const models = Array.isArray(payload?.models) ? payload.models : [];
+      return models
+        .filter((m: any) => m && typeof m.slug === 'string' && m.slug && m.visibility === 'list')
+        .map((m: any) => ({
+          id: m.slug as string,
+          label: (typeof m.display_name === 'string' && m.display_name) ? m.display_name : (m.slug as string),
+        }));
+    } catch (e: any) {
+      if (controller.signal.aborted || e?.name === 'AbortError') {
+        throw new Error(`ChatGPT model catalog request timed out after ${Math.round(CODEX_MODELS_TIMEOUT_MS / 1000)}s.`);
+      }
+      if (e instanceof Error && /^ChatGPT /.test(e.message)) throw e;
+      throw new Error(`ChatGPT model catalog request failed: ${sanitizeErrorMessage(String(e?.message || e))}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Await a current bearer token from CodexOAuthService, refreshing when the
+   * cached token is missing/stale. Throws a user-actionable error when the
+   * user is not signed in.
+   */
+  private static async getFreshAccessToken(): Promise<string> {
+    const oauth = CodexOAuthService.getInstance();
+    const status = oauth.getStatus();
+    if (!status.signedIn) {
+      throw new Error('Not signed in to ChatGPT. Please complete Codex OAuth login from Settings → AI Providers.');
+    }
+    const accessToken = await oauth.getAccessToken();
+    if (!accessToken) {
+      throw new Error('Not signed in to ChatGPT. Please complete Codex OAuth login from Settings → AI Providers.');
+    }
+    return accessToken;
   }
 
   /**
@@ -425,36 +578,19 @@ export class CodexCliService {
   }
 
   /**
-   * Build the request headers. Pulls the bearer token from CodexOAuthService
-   * and adds the standard identity headers the Codex backend expects
-   * (mirrors open-sse codex.js buildHeaders at codex.md:220-231).
+   * Build the request headers for the public Responses API. The bearer token
+   * comes from CodexOAuthService; everything else is standard HTTP content
+   * negotiation. We intentionally send NO Codex-CLI identity headers
+   * (`originator`, `chatgpt-account-id`, `session_id`) — this is the official
+   * ChatGPT-plan flow, not the Codex backend.
    */
   private static async buildHeadersAsync(): Promise<Record<string, string>> {
-    const oauth = CodexOAuthService.getInstance();
-    const accessToken = await oauth.getAccessToken();
-    if (!accessToken) {
-      throw new Error('Not signed in to ChatGPT. Please complete Codex OAuth login from Settings → AI Providers.');
-    }
-    const tokens = oauth.getCachedTokens();
-    const headers: Record<string, string> = {
+    const accessToken = await this.getFreshAccessToken();
+    return {
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',
       Authorization: `Bearer ${accessToken}`,
-      // Identify the client. The official codex CLI uses "codex_cli_rs" —
-      // matching it keeps the backend on the same routing path. See
-      // codex.md:1117 and codex.md:224.
-      originator: 'codex_cli_rs',
-      // Stable session id for backend routing/billing/cache bucketing.
-      // The Codex backend keys prompt-cache + rate-limit off this header
-      // (codex.md:222). Default = per-process stable SESSION_ID so
-      // consecutive calls land in the same bucket; callers can override
-      // via CodexCliRunOptions.sessionId for explicit multi-call flows.
-      'session_id': CodexCliService.SESSION_ID,
     };
-    // Workspace binding header — improves account scope + cache affinity
-    // (codex.md:226-229).
-    if (tokens?.accountId) headers['chatgpt-account-id'] = tokens.accountId;
-    return headers;
   }
 
   /**
@@ -469,16 +605,11 @@ export class CodexCliService {
     if (!tokens || !tokens.accessToken) {
       throw new Error('Not signed in to ChatGPT. Please complete Codex OAuth login from Settings → AI Providers.');
     }
-    const headers: Record<string, string> = {
+    return {
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',
       Authorization: `Bearer ${tokens.accessToken}`,
-      originator: 'codex_cli_rs',
-      // Stable session id (see buildHeadersAsync for the rationale).
-      'session_id': CodexCliService.SESSION_ID,
     };
-    if (tokens.accountId) headers['chatgpt-account-id'] = tokens.accountId;
-    return headers;
   }
 
   // ---------------------------------------------------------------------------
@@ -487,10 +618,17 @@ export class CodexCliService {
 
   /**
    * Execute the fetch and yield text deltas as they arrive. Handles:
+   *  - success ONLY when `response.completed` was observed
    *  - 401 → force-refresh the token and retry ONCE
-   *  - 429 / 5xx → exponential backoff with jitter, up to TRANSIENT_RETRY_MAX
+   *  - 429 / 5xx / network → exponential backoff with jitter, up to
+   *    TRANSIENT_RETRY_MAX, but ONLY before the first visible delta
    *  - AbortSignal / deadline → propagate to the fetch + reader
    *  - SSE parsing (event: / data: / [DONE] / multi-line data)
+   *
+   * Failure events (`response.failed`, `response.incomplete`, `error`) are
+   * surfaced as explicit, sanitized errors. `[DONE]` and a bare EOF are NOT
+   * success: a stream that ends without `response.completed` throws. Deltas
+   * already yielded to the caller are always preserved.
    */
   private static async *fetchDeltas(
     body: Record<string, unknown>,
@@ -500,6 +638,10 @@ export class CodexCliService {
   ): AsyncGenerator<string, void, unknown> {
     let attempt = 0;
     let refreshedOnce = false;
+    // Once any delta has been yielded to the caller, replaying the request
+    // would duplicate visible text. Retries are therefore forbidden from
+    // this point on — the failure is surfaced instead.
+    let visibleYielded = false;
 
     while (true) {
       if (signal.aborted) {
@@ -509,10 +651,6 @@ export class CodexCliService {
       // Re-mint headers on each attempt so a 401-retry uses the FRESH
       // access token (after the refresh succeeded, not before).
       const currentHeaders = await this.buildHeadersAsync();
-      // Merge session-stateful headers (Bearer, account id) with the
-      // per-attempt computed ones. Callers may have passed static
-      // Content-Type/originator in `headers`; the async builder
-      // overwrites with the same values.
       const merged: Record<string, string> = { ...headers, ...currentHeaders };
 
       let response: Response;
@@ -524,7 +662,7 @@ export class CodexCliService {
           payload: body,
           serializedPayload: serializedBody,
         });
-        response = await fetch(CODEX_RESPONSES_URL, {
+        response = await chatGPTFetch(CODEX_RESPONSES_URL, {
           method: 'POST',
           headers: merged,
           body: serializedBody,
@@ -535,9 +673,9 @@ export class CodexCliService {
         if (e?.name === 'AbortError') {
           throw new Error('Codex request aborted.');
         }
-        // Network error: retry with backoff.
-        if (attempt >= TRANSIENT_RETRY_MAX) {
-          throw new Error(`Codex request failed after ${TRANSIENT_RETRY_MAX} retries: ${e?.message || e}`);
+        // Network error: retry with backoff, but never after visible text.
+        if (visibleYielded || attempt >= TRANSIENT_RETRY_MAX) {
+          throw new Error(`Codex request failed after ${attempt + 1} attempt(s): ${sanitizeErrorMessage(String(e?.message || e))}`);
         }
         await sleepWithJitter(attempt);
         attempt++;
@@ -545,8 +683,7 @@ export class CodexCliService {
       }
 
       if (response.status === 401 && !refreshedOnce) {
-        // Force a refresh and retry exactly once. Matches open-sse
-        // chatCore:844-863.
+        // Force a refresh and retry exactly once.
         refreshedOnce = true;
         const oauth = CodexOAuthService.getInstance();
         const refreshed = await oauth.refreshTokens();
@@ -557,45 +694,54 @@ export class CodexCliService {
       }
 
       if (response.status === 429 || (response.status >= 500 && response.status < 600)) {
-        if (attempt >= TRANSIENT_RETRY_MAX) {
-          const text = await safeReadText(response);
-          throw new Error(`Codex upstream ${response.status} after ${TRANSIENT_RETRY_MAX} retries: ${truncate(text, 500)}`);
+        // Transient upstream — safe to retry ONLY before any visible text.
+        if (!visibleYielded && attempt < TRANSIENT_RETRY_MAX) {
+          attempt++;
+          const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
+          await sleepWithJitter(attempt - 1, retryAfter);
+          continue;
         }
-        attempt++;
-        // Honour Retry-After if the server sends one.
-        const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
-        await sleepWithJitter(attempt - 1, retryAfter);
-        continue;
+        throw new Error(`Codex upstream ${response.status}${visibleYielded ? ' (after partial response)' : ` after ${TRANSIENT_RETRY_MAX} retries`}.`);
       }
 
       if (!response.ok) {
-        // Non-retryable upstream error. Read the body (it's small —
-        // usually an error envelope) and surface the message verbatim
-        // so the user sees "model not supported when using Codex with
-        // a ChatGPT account" instead of the canned fallback.
+        // Non-retryable upstream error. Read the body (it's small — usually
+        // an error envelope) and surface the message so the user sees e.g.
+        // "model not supported when using Codex with a ChatGPT account"
+        // instead of the canned fallback. Messages are sanitized.
         const text = await safeReadText(response);
-        const message = extractResponsesErrorMessage(text) || `Codex upstream ${response.status}`;
-        throw new Error(message);
+        const message = sanitizeErrorMessage(extractResponsesErrorMessage(text)) || `Codex upstream ${response.status}`;
+        throw new CodexStreamError(message);
       }
 
-      // Happy path: stream SSE.
-      // parseSseStream may throw TransientStreamError for mid-stream
-      // "overloaded" responses. Catch here to retry with backoff.
+      // Happy path: stream SSE. parseSseStream throws for terminal failures
+      // and records completion/incompletion into `state`.
+      const state: SseStreamState = { completed: false, incomplete: null };
       try {
-        yield* this.parseSseStream(response, signal);
-        attempt = 0; // reset for the next request in a long-lived session
-        return;
+        for await (const delta of this.parseSseStream(response, signal, state)) {
+          visibleYielded = true;
+          yield delta;
+        }
       } catch (e: any) {
-        if (e instanceof TransientStreamError) {
-          if (attempt >= TRANSIENT_RETRY_MAX) {
-            throw new Error(e.message);
-          }
+        if (e instanceof TransientStreamError && !visibleYielded && attempt < TRANSIENT_RETRY_MAX) {
           await sleepWithJitter(attempt);
           attempt++;
           continue;
         }
+        // A real failure after visible text was yielded: surface it. Never
+        // retry/replay — that would duplicate the partial answer.
         throw e;
       }
+
+      if (state.incomplete) {
+        throw new CodexStreamError(formatIncompleteError(state.incomplete), state.incomplete.code);
+      }
+      if (!state.completed) {
+        // EOF or bare [DONE] without response.completed is NOT success.
+        throw new CodexStreamError('Codex stream ended without response.completed.');
+      }
+      attempt = 0; // reset for the next request in a long-lived session
+      return;
     }
   }
 
@@ -618,9 +764,23 @@ export class CodexCliService {
    * We extract deltas (response.output_text.delta) and yield them as
    * strings. The done event carries the full text; we don't yield it
    * because the deltas already produced the same content (avoids
-   * double-yielding). Errors embedded in the stream surface immediately.
+   * double-yielding).
+   *
+   * Terminal-event policy (models-and-inference.md §3):
+   *   - `response.completed` → success. Recorded on `state.completed`.
+   *   - `response.incomplete` → failure. Recorded on `state.incomplete`
+   *     (the caller throws after the yielded text is preserved).
+   *   - `response.failed` / `error` → throw a sanitized CodexStreamError
+   *     immediately. Usage-limit / sharing codes are never transient.
+   *   - `[DONE]` is ignored and a bare EOF records nothing, so the caller's
+   *     `state.completed` check turns both into an explicit failure.
+   *
+   * When `state` is omitted (legacy two-arg direct calls), terminal events
+   * are still classified but completion is simply not recorded anywhere.
    */
-  private static async *parseSseStream(response: Response, signal: AbortSignal): AsyncGenerator<string, void, unknown> {
+  private static parseSseStream(response: Response, signal: AbortSignal): AsyncGenerator<string, void, unknown>;
+  private static parseSseStream(response: Response, signal: AbortSignal, state: SseStreamState): AsyncGenerator<string, void, unknown>;
+  private static async *parseSseStream(response: Response, signal: AbortSignal, state?: SseStreamState): AsyncGenerator<string, void, unknown> {
     if (!response.body) {
       throw new Error('Codex response had no body.');
     }
@@ -647,7 +807,6 @@ export class CodexCliService {
     // recognize (in practice chatgpt.com sometimes sends the final
     // delta + closes the body without emitting response.completed).
     let sawTerminalEvent = false;
-    let terminalError: Error | null = null;
     try {
       while (true) {
         if (signal.aborted) {
@@ -657,11 +816,12 @@ export class CodexCliService {
         if (done) {
           // Body closed cleanly (server sent EOF, or our own prior
           // reader.cancel() in the finally of an earlier code path
-          // unwound the body). This IS a successful completion — deltas
-          // were already flushed. Set sawTerminalEvent so any future
-          // AbortError on the catch's swallow predicate treats this
-          // stream as post-completion cleanup, in case the abort
-          // signal fires after the loop exits.
+          // unwound the body). NOTE: a bare EOF is NOT success — only
+          // `response.completed` is (enforced by the caller via
+          // `state.completed`). `sawTerminalEvent` here only governs the
+          // post-completion AbortError swallow below: a stream that ended
+          // (even without a recognised terminal event) must not surface a
+          // late abort as a stream error.
           sawTerminalEvent = true;
           break;
         }
@@ -694,50 +854,31 @@ export class CodexCliService {
             // Tolerate non-JSON lines (e.g. comments). Don't yield.
             continue;
           }
-          const delta = extractResponsesTextDelta(json);
+          const { delta, terminal } = CodexCliService.classifySseEvent(json, state);
           if (delta) yield delta;
-          const errMsg = extractResponsesStreamError(json);
-          if (errMsg) {
-            terminalError = isTransientStreamMessage(errMsg)
-              ? new TransientStreamError(errMsg)
-              : new Error(errMsg);
-            break;
-          }
-          // Real terminal events on the Responses SSE stream. Once
-          // any of these arrive, we know the model has finished and
-          // the deltas have all been yielded. From here on, ANY
-          // AbortError on reader.read() is post-completion cleanup
-          // noise — don't surface it.
-          if (json && (json.type === 'response.completed' ||
-              json.type === 'response.incomplete' ||
-              json.type === 'response.failed')) {
+          if (terminal) {
             sawTerminalEvent = true;
             break;
           }
         }
-        if (terminalError) break;
         if (sawTerminalEvent) break;
       }
       // Drain any trailing buffer (last event without trailing blank line).
       if (buffer.trim()) {
         const parsed = parseSseEvent(buffer);
         if (parsed && parsed.data && parsed.data !== '[DONE]') {
+          let json: any;
+          let isJson = true;
           try {
-            const json = JSON.parse(parsed.data);
-            const delta = extractResponsesTextDelta(json);
+            json = JSON.parse(parsed.data);
+          } catch {
+            isJson = false; // not JSON, ignore
+          }
+          if (isJson) {
+            const { delta, terminal } = CodexCliService.classifySseEvent(json, state);
             if (delta) yield delta;
-            const errMsg = extractResponsesStreamError(json);
-            if (errMsg) {
-              terminalError = isTransientStreamMessage(errMsg)
-                ? new TransientStreamError(errMsg)
-                : new Error(errMsg);
-            }
-            if (json && (json.type === 'response.completed' ||
-                json.type === 'response.incomplete' ||
-                json.type === 'response.failed')) {
-              sawTerminalEvent = true;
-            }
-          } catch { /* not JSON, ignore */ }
+            if (terminal) sawTerminalEvent = true;
+          }
         }
       }
     } catch (e: any) {
@@ -790,10 +931,58 @@ export class CodexCliService {
       // a prior cancel) — we just need to absorb it.
       reader.cancel().catch(() => { /* already torn down */ });
     }
-    if (terminalError) throw terminalError;
-    // We intentionally don't require [DONE] — some servers omit it; an
-    // open stream that just ends is treated as successful (the deltas
-    // already produced the response).
+    // Reaching here does NOT imply success. A bare EOF or a `[DONE]`-only
+    // stream records no `state.completed`; the caller (fetchDeltas) turns
+    // that into an explicit "ended without response.completed" failure.
+  }
+
+  /**
+   * Classify one Responses SSE event payload.
+   *
+   * Returns the text delta (if any) plus whether the event is terminal.
+   * Throws a sanitized `CodexStreamError` for `response.failed` / `error`
+   * events; transient overload `error` events become `TransientStreamError`
+   * (retryable only before visible text) unless they carry a usage-limit /
+   * sharing code, which is always a hard failure.
+   */
+  private static classifySseEvent(
+    json: any,
+    state?: SseStreamState,
+  ): { delta: string; terminal: boolean } {
+    const delta = extractResponsesTextDelta(json);
+    const type = json?.type;
+
+    if (type === 'response.completed') {
+      if (state) state.completed = true;
+      return { delta, terminal: true };
+    }
+
+    if (type === 'response.incomplete') {
+      const details = json?.response?.incomplete_details;
+      if (state) {
+        state.incomplete = {
+          reason: typeof details?.reason === 'string' ? details.reason : undefined,
+          code: typeof details?.code === 'string' ? details.code : undefined,
+        };
+      }
+      return { delta, terminal: true };
+    }
+
+    if (type === 'response.failed') {
+      const failure = extractResponsesFailure(json);
+      throw new CodexStreamError(sanitizeErrorMessage(formatResponsesFailure(failure)), failure.code);
+    }
+
+    if (type === 'error') {
+      const failure = extractResponsesFailure(json);
+      const message = sanitizeErrorMessage(formatResponsesFailure(failure)) || 'Codex stream error.';
+      if (!isQuotaOrSharingCode(failure.code) && isTransientStreamMessage(message)) {
+        throw new TransientStreamError(message, failure.code);
+      }
+      throw new CodexStreamError(message, failure.code);
+    }
+
+    return { delta, terminal: false };
   }
 
   // ---------------------------------------------------------------------------
@@ -958,20 +1147,38 @@ function extractResponsesTextDelta(payload: any): string {
   return '';
 }
 
-/** Pull a human-readable error message out of a Responses API SSE event
- *  (e.g. `response.failed` or `error`). Returns empty string if this
- *  event is not an error. */
-function extractResponsesStreamError(payload: any): string {
-  if (!payload || typeof payload !== 'object') return '';
-  const type = payload.type;
-  if (type === 'response.failed' || type === 'error') {
-    if (payload.error?.message) return String(payload.error.message);
-    if (typeof payload.message === 'string') return payload.message;
+/** Pull a structured failure out of a Responses API SSE event. Covers both
+ *  `response.failed` (error under `response.error`) and explicit `error`
+ *  events (error at the top level). */
+function extractResponsesFailure(payload: any): { message: string; code?: string } {
+  if (!payload || typeof payload !== 'object') return { message: '' };
+  const err = payload.response?.error || payload.error;
+  const code = typeof err?.code === 'string' ? err.code : undefined;
+  const rawMessage =
+    (typeof err?.message === 'string' && err.message)
+    || (typeof payload.message === 'string' && payload.message)
+    || '';
+  return { message: rawMessage, code };
+}
+
+/** Map a structured failure to a user-facing message. Usage-limit / sharing
+ *  codes get an explicit, actionable string even when the backend omits a
+ *  message. */
+function formatResponsesFailure(failure: { message: string; code?: string }): string {
+  switch (failure.code) {
+    case 'subscription_sharing_usage_limit_exceeded':
+      return 'ChatGPT plan usage limit reached (subscription_sharing_usage_limit_exceeded).';
+    case 'subscription_sharing_usage_unavailable':
+      return 'ChatGPT plan usage is temporarily unavailable (subscription_sharing_usage_unavailable).';
+    default:
+      return failure.message;
   }
-  if (payload?.response?.error?.message) {
-    return String(payload.response.error.message);
-  }
-  return '';
+}
+
+/** Human-readable message for a `response.incomplete` terminal event. */
+function formatIncompleteError(incomplete: { reason?: string; code?: string }): string {
+  const detail = incomplete.reason || incomplete.code;
+  return detail ? `Codex response incomplete (${detail}).` : 'Codex response incomplete.';
 }
 
 /** Pull a human-readable error from a non-2xx JSON body. */

@@ -2662,6 +2662,11 @@ export class DatabaseManager {
                 this.db!.exec('DELETE FROM ai_interactions');
                 this.db!.exec('DELETE FROM transcripts');
                 this.db!.exec('DELETE FROM meetings');
+                for (const table of ['interview_record_candidate_turns', 'interview_record_rounds', 'interview_record_sessions']) {
+                    if (this.db!.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) {
+                        this.db!.exec(`DELETE FROM ${table}`);
+                    }
+                }
             })();
 
             console.log('[DatabaseManager] All data cleared from database.');

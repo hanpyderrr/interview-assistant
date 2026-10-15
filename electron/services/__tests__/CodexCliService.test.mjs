@@ -279,8 +279,8 @@ test('run: throws when Codex OAuth is not signed in', async () => {
   const oauthModulePath = path.resolve(__dirname, '../../../dist-electron/electron/services/CodexOAuthService.js');
   const oauthMod = await import(pathToFileURL(oauthModulePath).href);
   oauthMod.CodexOAuthService.getInstance().__resetForTest();
-  // Defensive: clear any persisted tokens by signing out.
-  oauthMod.CodexOAuthService.getInstance().signOut();
+  // Keep the test in memory; never clear a developer's persisted credentials.
+  oauthMod.CodexOAuthService.getInstance().__setCachedTokensForTest({ accessToken: '', refreshToken: '', expiresAt: 0 });
 
   await assert.rejects(
     () => CodexCliService.run('', {
@@ -295,7 +295,7 @@ test('stream: throws when Codex OAuth is not signed in', async () => {
   const oauthModulePath = path.resolve(__dirname, '../../../dist-electron/electron/services/CodexOAuthService.js');
   const oauthMod = await import(pathToFileURL(oauthModulePath).href);
   oauthMod.CodexOAuthService.getInstance().__resetForTest();
-  oauthMod.CodexOAuthService.getInstance().signOut();
+  oauthMod.CodexOAuthService.getInstance().__setCachedTokensForTest({ accessToken: '', refreshToken: '', expiresAt: 0 });
 
   const gen = CodexCliService.stream('', {
     prompt: 'hi', model: 'gpt-5.4', timeoutMs: 5_000,

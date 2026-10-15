@@ -17,6 +17,7 @@ import { AIProvidersSettings } from './settings/AIProvidersSettings';
 import { PlansSettings } from './settings/PlansSettings';
 import { PhoneMirrorSettings } from './settings/PhoneMirrorSettings';
 import { IntelligenceSettings } from './settings/IntelligenceSettings';
+import { InterviewAnswerSettings } from './settings/InterviewAnswerSettings';
 import { SkillsSettings } from './settings/SkillsSettings';
 import { LocalWhisperModelPanel } from './LocalWhisperModelPanel';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
@@ -390,6 +391,7 @@ const SETTINGS_NAV_ORDER = [
     'plans',
     'ai-providers',
     'skills',
+    'interview-answer',
     'calendar',
     'audio',
     'keybinds',
@@ -1799,6 +1801,13 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                     >
                                         {activeTab === 'skills' && navActivePill}
                                         <Folder size={16} /> {t('Skills')}
+                                    </button>
+                                    <button
+                                        onClick={() => setActiveTab('interview-answer')}
+                                        className={navItemClass(activeTab === 'interview-answer')}
+                                    >
+                                        {activeTab === 'interview-answer' && navActivePill}
+                                        <MessageSquare size={16} /> 面试回答
                                     </button>
                                     <button
                                         onClick={() => setActiveTab('calendar')}
@@ -3693,6 +3702,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
 
                             {activeTab === 'intelligence' && (
                                 <IntelligenceSettings />
+                            )}
+
+                            {activeTab === 'interview-answer' && (
+                                <InterviewAnswerSettings />
                             )}
 
                             {activeTab === 'help' && (

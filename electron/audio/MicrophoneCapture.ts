@@ -86,7 +86,10 @@ export class MicrophoneCapture extends EventEmitter {
     /**
      * Start capturing microphone audio
      */
+    public canStart: () => boolean = () => true;
+
     public start(): void {
+        if (!this.canStart()) return;
         if (this.isRecording) return;
 
         if (!RustMicCapture) {

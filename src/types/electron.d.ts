@@ -1,3 +1,4 @@
+import type { InterviewRecordsAPI } from '../../shared/interviewRecords';
 // Phase 3 — DynamicActionPayload mirrors electron/services/dynamic-actions/DynamicAction.ts.
 // Kept as a structural interface (not a class import) to preserve the strict main↔renderer
 // type boundary — the renderer never imports from electron/* directly.
@@ -75,7 +76,7 @@ export interface NativeAudioTranscriptEvent {
   diagnostics?: NativeAudioTranscriptDiagnostics
 }
 
-export interface ElectronAPI {
+export interface ElectronAPI extends InterviewRecordsAPI {
   updateContentDimensions: (dimensions: {
     width: number
     height: number
@@ -181,7 +182,7 @@ export interface ElectronAPI {
   onOpenSettingsTab: (callback: (tab: string) => void) => () => void
 
   // LLM Model Management
-  getCurrentLlmConfig: () => Promise<{ provider: "ollama" | "gemini" | "custom" | "codex-cli"; /** @deprecated use `modelId` for selection, `displayName` for UI */ model: string; modelId: string; displayName: string; isOllama: boolean }>
+  getCurrentLlmConfig: () => Promise<{ provider: "ollama" | "gemini" | "custom" | "codex-cli" | "deepseek"; /** @deprecated use `modelId` for selection, `displayName` for UI */ model: string; modelId: string; displayName: string; isOllama: boolean }>
   getAvailableOllamaModels: () => Promise<string[]>
   /** Whether a denied data scope would actually be handled on-device. */
   getLocalFallbackStatus: () => Promise<{ text: boolean; vision: boolean }>
@@ -387,9 +388,10 @@ export interface ElectronAPI {
   modesRemoveAllNoteSections: (modeId: string) => Promise<{ success: boolean; error?: string }>
 
   // Meeting Lifecycle
+  setCandidateCaptureEnabled: (enabled: boolean) => Promise<{ success: boolean }>
   startMeeting: (metadata?: any) => Promise<{ success: boolean; error?: string; code?: string }>
   endMeeting: () => Promise<{ success: boolean; error?: string }>
-  retrieveInterviewKnowledge?: (question: string) => Promise<{ success: boolean; context?: string; matches?: Array<{ id: string; title: string; excerpt: string; score: number; source?: string }>; error?: string }>
+  retrieveInterviewKnowledge?: (question: string, scope?: { role?: '' | 'ai_agent' | 'embedded_linux'; projectIds?: string[] }) => Promise<{ success: boolean; context?: string; matches?: Array<{ id: string; title: string; excerpt: string; score: number; source?: string }>; error?: string }>
   debugInjectTranscript: (segments: Array<{ speaker?: string; text: string; timestamp?: number; confidence?: number }>)
     => Promise<{ success: boolean; injected?: number; error?: string }>
   finalizeMicSTT: () => Promise<void>
@@ -453,7 +455,7 @@ export interface ElectronAPI {
   onSessionReset: (callback: () => void) => () => void;
 
   // Streaming listeners
-  streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean }) => Promise<void>
+  streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean, interviewTest?: boolean; interviewQuestion?: string, hasRelevantPersonalEvidence?: boolean; interviewProjectIds?: string[] }) => Promise<void | null | { finalText: string; streamId: number }>
   onGeminiStreamToken: (callback: (token: string, meta?: { streamId?: number }) => void) => () => void
   onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number }) => void) => () => void
   onGeminiStreamError: (callback: (error: string, meta?: { streamId?: number | null; source?: string }) => void) => () => void;
@@ -491,9 +493,10 @@ export interface ElectronAPI {
   codexCliLogin: (config?: any) => Promise<{ success: boolean; action: string; output?: string; error?: string; resolvedPath?: string; config?: any }>;
   codexCliDoctor: (config?: any) => Promise<{ success: boolean; action: string; output?: string; error?: string; resolvedPath?: string; config?: any }>;
   // ChatGPT OAuth (PKCE) — replaces the old `codex login` CLI subprocess.
+  codexListModels: () => Promise<{ success: boolean; models?: Array<{ id: string; label: string }>; error?: string }>;
   codexLoginStatus: () => Promise<{ success: boolean; signedIn: boolean; email?: string; expiresAt?: number; error?: string }>;
   codexStartLogin: () => Promise<{ success: boolean; email?: string; expiresAt?: number; error?: string }>;
-  codexSignOut: () => Promise<{ success: boolean; error?: string }>;
+  codexSignOut: () => Promise<{ success: boolean; remoteRevoked?: boolean; warning?: string; error?: string }>;
   codexRefreshTokens: () => Promise<{ success: boolean; email?: string; expiresAt?: number; error?: string }>;
   onCodexLoginComplete: (callback: (info: { email?: string }) => void) => () => void;
   onCodexLoginFailed: (callback: (info: { message: string }) => void) => () => void;

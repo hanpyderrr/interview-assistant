@@ -18,10 +18,10 @@ test('InterviewConsole persists the three-level selector with student as the def
 test('each answer job snapshots one level and uses it for prompt, prewarm, and fallback history', () => {
   assert.match(source, /type AnswerJob = \{[^}]*answerLevel: InterviewAnswerLevel/s);
   assert.match(source, /answerLevel:\s*answerLevelRef\.current/);
-  assert.match(source, /consume\(job\.analysisQuestion, job\.conversationContext, job\.answerLevel\)/);
-  assert.match(source, /buildInterviewConsolePrompt\(job\.analysisQuestion, context, job\.conversationContext, job\.answerLevel\)/);
+  assert.match(source, /consume\(job\.analysisQuestion, job\.conversationContext, job\.answerLevel, job\.englishMode, job\.customInstructions, job\.profile, job\.currentProjects\)/);
+  assert.match(source, /buildInterviewConsolePrompt\(job\.analysisQuestion, context, job\.conversationContext, job\.answerLevel, job\.englishMode, job\.customInstructions, job\.profile, job\.scope\)/);
   assert.match(source, /type: 'enqueue'[^}]*answerLevel: job\.answerLevel/s);
-  assert.match(source, /\.prewarm\([^;]*answerLevelRef\.current\)/s);
+  assert.match(source, /\.prewarm\([^;]*answerLevelRef\.current, englishModeRef\.current, loadInterviewPrompt\(\), interviewProfileRef\.current, currentProjectsRef\.current\)/s);
 });
 
 test('changing the level clears speculative work without resetting active answer state', () => {

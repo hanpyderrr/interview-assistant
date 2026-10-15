@@ -767,7 +767,7 @@ Return ONLY valid JSON (no markdown code blocks):
             try {
                 const enhancements = (summaryData as any) || {};
                 telemetryService.track({
-                    name: 'post_call_summary_completed',
+                    name: meetingData.summaryStatus === 'completed' ? 'post_call_summary_completed' : 'post_call_summary_failed',
                     modeId: modeSnapshot?.id,
                     durationMs: Date.now() - _postCallStart,
                     properties: {

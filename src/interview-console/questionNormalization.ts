@@ -33,5 +33,15 @@ export function normalizeInterviewQuestion(value: unknown): string {
     normalized = normalized.replace(pattern, replacement)
   }
 
+  // Observed FunASR homophones need domain context, not global replacements.
+  if (/采样|参考电压|量化误差|ADC/i.test(normalized)) {
+    normalized = normalized.replace(/魔术转换/g, '模数转换')
+  }
+  if (/外设|单片机|嵌入式/.test(normalized)
+    && /中断|时序|丢数据/.test(normalized)
+    && !/基因|生物|测序|序列|核酸|染色体/.test(normalized)) {
+    normalized = normalized.replace(/(?<![a-z])dna(?![a-z])/gi, 'DMA')
+  }
+
   return normalized
 }

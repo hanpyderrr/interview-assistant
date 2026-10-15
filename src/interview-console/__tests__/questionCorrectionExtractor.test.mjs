@@ -50,11 +50,11 @@ test('marker spanning a chunk boundary is found', () => {
   assert.equal(second.display, '文本正文');
 });
 
-test('unterminated section is returned verbatim by finish', () => {
+test('unterminated content is preserved without its internal marker by finish', () => {
   const extractor = createQuestionCorrectionExtractor(QUESTION);
   const first = extractor.feed('【问题修正】请介绍 SPI 帧同步的设计');
   assert.equal(first.display, '');
-  assert.equal(extractor.finish(), '【问题修正】请介绍 SPI 帧同步的设计');
+  assert.equal(extractor.finish(), '请介绍 SPI 帧同步的设计');
   assert.equal(extractor.done(), true);
 });
 
@@ -68,14 +68,14 @@ test('successful answer resolve flushes a held ordinary-text tail without loss',
   assert.equal(visible, '这是普通正文结尾');
 });
 
-test('successful answer resolve preserves a cross-chunk unterminated correction block', () => {
+test('successful answer resolve preserves ambiguous unterminated content without its marker', () => {
   const extractor = createQuestionCorrectionExtractor(QUESTION);
   let visible = '';
   for (const chunk of ['【问题', '修正】未闭合正文']) {
     visible += extractor.feed(chunk).display;
   }
   flushResolvedCorrectionExtractor(extractor, (leftover) => { visible += leftover; });
-  assert.equal(visible, '【问题修正】未闭合正文');
+  assert.equal(visible, '未闭合正文');
 });
 
 test('successful candidate resolve uses the same exact-tail flush contract', () => {
@@ -91,8 +91,7 @@ test('rejects a correction that changes the technical term', () => {
   const extractor = createQuestionCorrectionExtractor(QUESTION);
   const result = extractor.feed('【问题修正】请介绍 I2C 帧同步的设计【/问题修正】正文');
   assert.equal(result.corrected, null);
-  assert.match(result.display, /^【问题修正】/);
-  assert.match(result.display, /正文$/);
+  assert.equal(result.display, '正文');
 });
 
 test('rejects a correction outside the length ratio', () => {
@@ -103,11 +102,11 @@ test('rejects a correction outside the length ratio', () => {
   assert.match(result.display, /正文$/);
 });
 
-test('abandons an oversized buffer and returns it for display', () => {
+test('abandons an oversized buffer without exposing its internal marker', () => {
   const extractor = createQuestionCorrectionExtractor(QUESTION, 10);
   const result = extractor.feed('【问题修正】非常非常非常长的未闭合内容');
   assert.equal(result.corrected, null);
-  assert.match(result.display, /^【问题修正】/);
+  assert.equal(result.display, '非常非常非常长的未闭合内容');
   assert.equal(extractor.done(), true);
 });
 
@@ -126,12 +125,156 @@ test('stripCorrectionSection removes a well-formed section from final text', () 
   assert.equal(result.text, '我的答案是……');
 });
 
-test('stripCorrectionSection leaves malformed or absent sections untouched', () => {
+test('stripCorrectionSection preserves ordinary and ambiguous content without control markers', () => {
   assert.equal(stripCorrectionSection('没有修正区的答案', QUESTION).text, '没有修正区的答案');
   const unterminated = stripCorrectionSection('【问题修正】没有闭合', QUESTION);
   assert.equal(unterminated.corrected, null);
-  assert.equal(unterminated.text, '【问题修正】没有闭合');
+  assert.equal(unterminated.text, '没有闭合');
   const invalid = stripCorrectionSection('【问题修正】请介绍 I2C 的设计【/问题修正】正文', QUESTION);
   assert.equal(invalid.corrected, null);
-  assert.equal(invalid.text, '【问题修正】请介绍 I2C 的设计【/问题修正】正文');
+  assert.equal(invalid.text, '正文');
+});
+
+
+test('accepts a whitelisted ASR correction without leaking its marker into the answer', () => {
+  const raw = '外设丢数据先怀疑中断dna时序还是电源？';
+  const corrected = '外设丢数据先怀疑中断DMA时序还是电源？';
+  const result = stripCorrectionSection(`【问题修正】${corrected}【/问题修正】先检查时序。`, raw);
+  assert.equal(result.corrected, corrected);
+  assert.equal(result.text, '先检查时序。');
+  assert.equal(isValidQuestionCorrection('DNA复制原理是什么？', 'DMA复制原理是什么？'), false);
+});
+
+test('final text tolerates a missing close marker only for an unchanged question line', () => {
+  const result = stripCorrectionSection('【问题修正】项目中有什么难题？\n\n先说明事实。', '项目中有什么难题？');
+  assert.equal(result.text.trim(), '先说明事实。');
+  assert.equal(result.corrected, '项目中有什么难题？');
+  assert.equal(stripCorrectionSection('【问题修正】别的内容\n正文', '项目中有什么难题？').corrected, null);
+});
+
+// --- new-content gate: a truncated tail must not be completed into a follow-up ---
+
+const TRUNCATED = '我们聊一下SPI驱动，你怎么设计帧头和CRC32校验的，如果如果那个';
+const TRUNCATED_PLUS_FOLLOW_UP =
+  `${TRUNCATED}，如果数据量增加该怎么调整？`;
+
+test('rejects completing a truncated tail into a brand new follow-up question', () => {
+  assert.equal(isValidQuestionCorrection(TRUNCATED, TRUNCATED_PLUS_FOLLOW_UP), false);
+});
+
+test('the extractor keeps the original question when the model appends a follow-up', () => {
+  const extractor = createQuestionCorrectionExtractor(TRUNCATED);
+  const result = extractor.feed(`【问题修正】${TRUNCATED_PLUS_FOLLOW_UP}【/问题修正】正文`);
+  assert.equal(result.corrected, null);
+  assert.equal(result.display, '正文');
+});
+
+test('stripCorrectionSection keeps a follow-up completion out of the answer', () => {
+  const section = `【问题修正】${TRUNCATED_PLUS_FOLLOW_UP}【/问题修正】正文`;
+  const result = stripCorrectionSection(section, TRUNCATED);
+  assert.equal(result.corrected, null);
+  assert.equal(result.text, '正文');
+});
+
+test('rejects an appended extra question even without new technical terms', () => {
+  assert.equal(
+    isValidQuestionCorrection('请介绍SPI帧同步的设计', '请介绍SPI帧同步的设计，它的时序如何保证？'),
+    false,
+  );
+  assert.equal(isValidQuestionCorrection('如果中断丢数据怎么办？', '如果中断丢数据怎么办？怎么定位？'), false);
+});
+
+test('rejects a correction that introduces new digits', () => {
+  assert.equal(isValidQuestionCorrection('请介绍SPI帧同步的设计', '请介绍SPI2帧同步的设计'), false);
+  assert.equal(isValidQuestionCorrection('CRC校验怎么实现？', 'CRC16校验怎么实现？'), false);
+});
+
+test('rejects a large semantic rewrite that keeps the same terms and length', () => {
+  assert.equal(
+    isValidQuestionCorrection(
+      '请你详细说明一下这个项目的整体架构和实现思路',
+      '请你简单描述一下那个系统的核心模块和设计方法',
+    ),
+    false,
+  );
+});
+
+test('still accepts plausible homophone, punctuation and whitespace fixes', () => {
+  // Homophone substitution, one character in and one out.
+  assert.equal(isValidQuestionCorrection('请介绍一下任务调度的优先极策略', '请介绍一下任务调度的优先级策略'), true);
+  // Whitespace / punctuation only.
+  assert.equal(isValidQuestionCorrection('请介绍SPI帧同步的设计', '请介绍 SPI 帧同步的设计。'), true);
+  // Adding the missing question mark of the same question.
+  assert.equal(isValidQuestionCorrection('你了解SPI的时序吗', '你了解SPI的时序吗？'), true);
+  // Removing a duplicated filler word.
+  assert.equal(isValidQuestionCorrection('如果如果中断丢数据怎么办？', '如果中断丢数据怎么办？'), true);
+});
+
+
+// A provider may end with no finalText after emitting a question line and a
+// spoken answer, but omit the correction close marker.
+for (const lineBreak of ['\n', '\r\n']) {
+  for (const body of ['我会先检查采集链路，再确认校验结果。', '我会先检查采集链路。'.repeat(50)]) {
+    test(`missing-close answer survives every chunk boundary and no-finalText flush (${lineBreak.length}, ${body.length})`, () => {
+      const input = `【问题修正】${QUESTION}${lineBreak}${lineBreak}${body}`;
+      const expected = `${lineBreak}${body}`;
+      const chunkings = [[input], Array.from(input)];
+      for (let split = 1; split < input.length; split += 1) {
+        chunkings.push([input.slice(0, split), input.slice(split)]);
+      }
+      for (const chunks of chunkings) {
+        const extractor = createQuestionCorrectionExtractor(QUESTION);
+        let visible = '';
+        let currentQuestion = QUESTION;
+        for (const chunk of chunks) {
+          const result = extractor.feed(chunk);
+          visible += result.display;
+          if (result.corrected) currentQuestion = result.corrected;
+        }
+        flushResolvedCorrectionExtractor(extractor, (leftover) => { visible += leftover; });
+        assert.equal(visible, expected);
+        assert.equal(currentQuestion, QUESTION);
+        assert.equal(stripCorrectionSection(input, QUESTION).text, visible);
+        assert.equal(extractor.finish(), '');
+      }
+    });
+  }
+}
+
+test('an unclosed rewritten question never changes the active question or eats the answer', () => {
+  const replacement = '请介绍 I2C2 的全新设计以及另外的问题？';
+  const body = '我会先核对已有接口定义。';
+  const input = `【问题修正】${replacement}\n\n${body}`;
+  const extractor = createQuestionCorrectionExtractor(QUESTION);
+  let visible = '';
+  for (const chunk of Array.from(input)) {
+    const result = extractor.feed(chunk);
+    assert.equal(result.corrected, null);
+    visible += result.display;
+  }
+  visible += extractor.finish();
+  assert.equal(visible, `${replacement}\n\n${body}`);
+  assert.deepEqual(stripCorrectionSection(input, QUESTION), { text: visible, corrected: null });
+});
+
+test('a valid-looking unclosed repair cannot rewrite the question', () => {
+  const candidate = '请介绍 SPI 帧同步的设计';
+  const input = `【问题修正】${candidate}\n\n我会按协议说明。`;
+  assert.equal(isValidQuestionCorrection(QUESTION, candidate), true);
+  const extractor = createQuestionCorrectionExtractor(QUESTION);
+  const result = extractor.feed(input);
+  assert.equal(result.corrected, null);
+  assert.equal(result.display + extractor.finish(), input.slice('【问题修正】'.length));
+  assert.equal(stripCorrectionSection(input, QUESTION).corrected, null);
+});
+
+test('ordinary answers and incomplete marker-like text survive all chunk splits', () => {
+  for (const input of ['先核对接口。\n\n再检查数据。', '普通答案结尾【问题修', '【问题说明】这里是正常正文']) {
+    for (let split = 0; split <= input.length; split += 1) {
+      const extractor = createQuestionCorrectionExtractor(QUESTION);
+      const chunks = [input.slice(0, split), input.slice(split)];
+      const visible = chunks.map((chunk) => extractor.feed(chunk).display).join('') + extractor.finish();
+      assert.equal(visible, input);
+    }
+  }
 });

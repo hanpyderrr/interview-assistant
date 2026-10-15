@@ -156,3 +156,13 @@ test('MicrophoneCapture emits pre_warm_failed when deferred pre-warm constructor
     await cap.destroy();
     await flushSetImmediate();
 });
+
+test('disabled capture refuses start and recovery without constructing a native microphone', async () => {
+    const cap = new MicrophoneCapture('disabled-mic');
+    const before = micInstanceCount;
+    cap.canStart = () => false;
+    cap.start();
+    cap.start();
+    assert.equal(micInstanceCount, before);
+    await cap.destroy();
+});

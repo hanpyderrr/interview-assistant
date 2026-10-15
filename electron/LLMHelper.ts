@@ -8188,9 +8188,10 @@ let isMultimodal = !!(imagePaths?.length);
     }
   }
 
-  public getCurrentProvider(): "ollama" | "gemini" | "custom" | "codex-cli" {
+  public getCurrentProvider(): "ollama" | "gemini" | "custom" | "codex-cli" | "deepseek" {
     if (this.customProvider) return "custom";
     if (this.isCodexCliModel(this.currentModelId)) return "codex-cli";
+    if (!this.useOllama && this.isDeepseekModel(this.currentModelId)) return "deepseek";
     return this.useOllama ? "ollama" : "gemini";
   }
 
@@ -8567,10 +8568,14 @@ let isMultimodal = !!(imagePaths?.length);
     const tokenCount = estimateTokens(context);
     console.log(`[LLMHelper] Estimated tokens: ${tokenCount}`);
 
-    // ATTEMPT 0: Custom Provider (highest priority — user explicitly chose this)
-    if (this.customProvider || this.activeCurlProvider) {
+    // Prefer the configured answer provider, including native DeepSeek/OpenAI.
+    const selectedOnlineProvider = !this.useOllama && (
+      (this.isDeepseekModel(this.currentModelId) && this.deepseekClient)
+      || (this.isOpenAiModel(this.currentModelId) && this.openaiClient)
+    );
+    if (this.customProvider || this.activeCurlProvider || selectedOnlineProvider) {
       try {
-        console.log(`[LLMHelper] Attempting custom provider for summary...`);
+        console.log(`[LLMHelper] Attempting selected provider for summary...`);
         // Collect the async generator into a Promise so withTimeout works.
         // ignoreKnowledgeMode=true: meeting summaries must never go through the
         // profile/knowledge intercept — it would corrupt the output.
@@ -8581,13 +8586,13 @@ let isMultimodal = !!(imagePaths?.length);
           }
           return result;
         };
-        const text = await this.withTimeout(collectChunks(), 60000, 'Custom Provider Summary');
+        const text = await this.withTimeout(collectChunks(), 60000, 'Selected Provider Summary');
         if (text.trim().length > 0) {
-          console.log(`[LLMHelper] ✅ Custom provider summary generated successfully.`);
+          console.log(`[LLMHelper] ✅ Selected provider summary generated successfully.`);
           return this.processResponse(text);
         }
       } catch (e: any) {
-        console.warn(`[LLMHelper] ⚠️ Custom provider summary failed: ${e.message}. Falling back...`);
+        console.warn(`[LLMHelper] ⚠️ Selected provider summary failed: ${e.message}. Falling back...`);
       }
     }
 
@@ -8664,87 +8669,89 @@ let isMultimodal = !!(imagePaths?.length);
 
     const contents = [{ text: `${systemPrompt}\n\nCONTEXT:\n${context}` }];
 
-    // ATTEMPT 3: Gemini Flash-Lite (cheapest/fastest — leads the Gemini cascade).
-    // 3 attempts with linear backoff before dropping to full Flash.
-    console.log(`[LLMHelper] Attempting Gemini Flash-Lite for summary...`);
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const text = await this.withTimeout(
-          this.generateContent(contents, GEMINI_FLASH_LITE_MODEL),
-          45000,
-          `Gemini Flash-Lite Summary (Attempt ${attempt})`
-        );
-        if (text.trim().length > 0) {
-          console.log(`[LLMHelper] ✅ Gemini Flash-Lite summary generated successfully (Attempt ${attempt}).`);
-          return this.processResponse(text);
-        }
-      } catch (e: any) {
-        console.warn(`[LLMHelper] ⚠️ Gemini Flash-Lite attempt ${attempt}/3 failed: ${e.message}`);
-        if (attempt < 3) {
-          await new Promise(r => setTimeout(r, 1000 * attempt)); // Linear backoff
-        }
-      }
-    }
-
-    // ATTEMPT 4: Gemini Flash (with 2 retries = 3 attempts total)
-    console.log(`[LLMHelper] ⚠️ Flash-Lite exhausted. Switching to Gemini Flash...`);
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const text = await this.withTimeout(
-          this.generateWithFlash(contents),
-          45000,
-          `Gemini Flash Summary (Attempt ${attempt})`
-        );
-        if (text.trim().length > 0) {
-          console.log(`[LLMHelper] ✅ Gemini Flash summary generated successfully (Attempt ${attempt}).`);
-          return this.processResponse(text);
-        }
-      } catch (e: any) {
-        console.warn(`[LLMHelper] ⚠️ Gemini Flash attempt ${attempt}/3 failed: ${e.message}`);
-        if (attempt < 3) {
-          await new Promise(r => setTimeout(r, 1000 * attempt)); // Linear backoff
-        }
-      }
-    }
-
-    // ATTEMPT 5: Gemini Pro
-    console.log(`[LLMHelper] ⚠️ Flash exhausted. Switching to Gemini Pro for robust retry...`);
-    const maxProRetries = 5;
-
     if (this.client) {
-      for (let attempt = 1; attempt <= maxProRetries; attempt++) {
+      // ATTEMPT 3: Gemini Flash-Lite (cheapest/fastest — leads the Gemini cascade).
+      // 3 attempts with linear backoff before dropping to full Flash.
+      console.log(`[LLMHelper] Attempting Gemini Flash-Lite for summary...`);
+      for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          console.log(`[LLMHelper] 🔄 Gemini Pro Attempt ${attempt}/${maxProRetries}...`);
-          await this.rateLimiters.gemini.acquire();
-          const response = await this.withTimeout(
-            // @ts-ignore
-            this.client.models.generateContent({
-              model: GEMINI_PRO_MODEL,
-              contents: contents,
-              config: {
-                maxOutputTokens: MAX_OUTPUT_TOKENS,
-                temperature: 0.3,
-              }
-            }),
-            60000,
-            `Gemini Pro Summary (Attempt ${attempt})`
+          const text = await this.withTimeout(
+            this.generateContent(contents, GEMINI_FLASH_LITE_MODEL),
+            45000,
+            `Gemini Flash-Lite Summary (Attempt ${attempt})`
           );
-          const text = response.text || "";
-
           if (text.trim().length > 0) {
-            console.log(`[LLMHelper] ✅ Gemini Pro summary generated successfully.`);
+            console.log(`[LLMHelper] ✅ Gemini Flash-Lite summary generated successfully (Attempt ${attempt}).`);
             return this.processResponse(text);
           }
         } catch (e: any) {
-          console.warn(`[LLMHelper] ⚠️ Gemini Pro attempt ${attempt} failed: ${e.message}`);
-          // Aggressive backoff for Pro: 2s, 4s, 8s, 16s, 32s
-          const backoff = 2000 * Math.pow(2, attempt - 1);
-          console.log(`[LLMHelper] Waiting ${backoff}ms before next retry...`);
-          await new Promise(r => setTimeout(r, backoff));
+          console.warn(`[LLMHelper] ⚠️ Gemini Flash-Lite attempt ${attempt}/3 failed: ${e.message}`);
+          if (attempt < 3) {
+            await new Promise(r => setTimeout(r, 1000 * attempt)); // Linear backoff
+          }
         }
       }
-    } else {
-      console.log(`[LLMHelper] Gemini client not initialized — skipping Gemini Pro.`);
+
+      // ATTEMPT 4: Gemini Flash (with 2 retries = 3 attempts total)
+      console.log(`[LLMHelper] ⚠️ Flash-Lite exhausted. Switching to Gemini Flash...`);
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const text = await this.withTimeout(
+            this.generateWithFlash(contents),
+            45000,
+            `Gemini Flash Summary (Attempt ${attempt})`
+          );
+          if (text.trim().length > 0) {
+            console.log(`[LLMHelper] ✅ Gemini Flash summary generated successfully (Attempt ${attempt}).`);
+            return this.processResponse(text);
+          }
+        } catch (e: any) {
+          console.warn(`[LLMHelper] ⚠️ Gemini Flash attempt ${attempt}/3 failed: ${e.message}`);
+          if (attempt < 3) {
+            await new Promise(r => setTimeout(r, 1000 * attempt)); // Linear backoff
+          }
+        }
+      }
+
+      // ATTEMPT 5: Gemini Pro
+      console.log(`[LLMHelper] ⚠️ Flash exhausted. Switching to Gemini Pro for robust retry...`);
+      const maxProRetries = 5;
+
+      if (this.client) {
+        for (let attempt = 1; attempt <= maxProRetries; attempt++) {
+          try {
+            console.log(`[LLMHelper] 🔄 Gemini Pro Attempt ${attempt}/${maxProRetries}...`);
+            await this.rateLimiters.gemini.acquire();
+            const response = await this.withTimeout(
+              // @ts-ignore
+              this.client.models.generateContent({
+                model: GEMINI_PRO_MODEL,
+                contents: contents,
+                config: {
+                  maxOutputTokens: MAX_OUTPUT_TOKENS,
+                  temperature: 0.3,
+                }
+              }),
+              60000,
+              `Gemini Pro Summary (Attempt ${attempt})`
+            );
+            const text = response.text || "";
+
+            if (text.trim().length > 0) {
+              console.log(`[LLMHelper] ✅ Gemini Pro summary generated successfully.`);
+              return this.processResponse(text);
+            }
+          } catch (e: any) {
+            console.warn(`[LLMHelper] ⚠️ Gemini Pro attempt ${attempt} failed: ${e.message}`);
+            // Aggressive backoff for Pro: 2s, 4s, 8s, 16s, 32s
+            const backoff = 2000 * Math.pow(2, attempt - 1);
+            console.log(`[LLMHelper] Waiting ${backoff}ms before next retry...`);
+            await new Promise(r => setTimeout(r, backoff));
+          }
+        }
+      } else {
+        console.log(`[LLMHelper] Gemini client not initialized — skipping Gemini Pro.`);
+      }
     }
 
     // ATTEMPT 6: Ollama (last-resort local fallback — gives users without ANY

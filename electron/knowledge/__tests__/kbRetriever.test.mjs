@@ -62,14 +62,19 @@ test('returns no matches for empty or unrelated questions', () => {
   assert.deepEqual(scoreEntries('量子火箭推进', plain), []);
 });
 
-test('bonus-only entries rank below term hits (known reference behavior)', () => {
-  // Mirrors scripts/interview-retriever.mjs: the fact_status bonus is applied
-  // before the score > 0 filter, so with more topK slots than genuine hits,
-  // bonus-only entries can appear — always ranked below real term matches.
+test('fact-status bonuses only break ties after a real term match', () => {
   const results = scoreEntries('SPI', embeddedFixtures, 5);
   assert.equal(results[0].entry.id, 'a.001');
-  assert.ok(results.slice(1).every((r) => r.score < results[0].score));
-  assert.deepEqual(results.map((r) => r.score), [5.15, 0.25, 0.15]);
+  assert.deepEqual(results.map((r) => r.score), [5.15]);
+});
+
+test('generic HR wording does not retrieve technical entries through common Chinese phrases', () => {
+  const entries = [
+    { id: 'tech-1', title: 'MCP 和 Skills 有什么区别', content: 'Agent 系统设计', keywords: ['MCP', 'Skills'], fact_status: 'prepared_answer' },
+    { id: 'tech-2', title: '线程优先级什么时候有用', content: '实时调度策略', keywords: ['线程', '优先级'], fact_status: 'prepared_answer' },
+  ];
+  assert.deepEqual(scoreEntries('你平时有什么兴趣爱好？', entries), []);
+  assert.deepEqual(scoreEntries('大学这几年你有什么心得？', entries), []);
 });
 
 test('prefers a project-specific boundary answer over a cross-project protocol template', () => {
@@ -153,6 +158,24 @@ test('uses explicit metadata to keep all six projects separated', () => {
     const results = scoreEntries(`请说明 ${projectId} 的项目边界`, entries, 6);
     assert.equal(results[0].entry.id, projectId);
   }
+});
+
+test('maps the Chinese interview validation lab alias to Career Evidence Lab', () => {
+  const entries = [
+    { id: 'career', title: 'Career Evidence Lab', content: '十题动态面试与证据验证。', keywords: ['动态面试'], project_ids: ['career_evidence_lab'], fact_status: 'resume_fact' },
+    { id: 'wing', title: '机翼结冰试验验证', content: '风洞验证台与采集链路。', keywords: ['验证台'], project_ids: ['wing_icing'], fact_status: 'resume_fact' },
+  ];
+  const results = scoreEntries('为什么会想到做面试验证台这个项目？', entries, 2);
+  assert.equal(results[0].entry.id, 'career');
+});
+
+test('prefers a single-project entry over a broad portfolio entry', () => {
+  const entries = [
+    { id: 'portfolio', title: '为什么族谱数字化项目要拆分多个 Agent', content: '族谱数字化与其他项目形成证据管理主线。', keywords: ['族谱数字化', '拆分多个 Agent'], project_ids: ['tof', 'career_evidence_lab', 'genealogy_agent'], fact_status: 'prepared_answer' },
+    { id: 'genealogy', title: '族谱处理状态', content: 'OCR 候选、关系建议和确认事实分层。', keywords: ['族谱'], project_ids: ['genealogy_agent'], fact_status: 'resume_fact' },
+  ];
+  const results = scoreEntries('为什么族谱项目要拆分多个 Agent？', entries, 2);
+  assert.equal(results[0].entry.id, 'genealogy');
 });
 
 // ── pure path resolution ────────────────────────────────────────────────────

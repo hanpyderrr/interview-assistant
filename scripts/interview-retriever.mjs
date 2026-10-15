@@ -7,13 +7,24 @@ import { pathToFileURL } from 'node:url';
 
 function terms(value) {
   const lowered = String(value ?? '').toLowerCase();
-  const latin = lowered.match(/[a-z0-9_+#.-]{2,}/g) ?? [];
+  // Preserve the complete identifier and also index compound protocol names.
+  // CRC variants share the generic checksum name; hardware model numbers stay exact.
+  const latin = (lowered.match(/[a-z0-9_+#.-]{2,}/g) ?? []).flatMap(term => [
+    term,
+    ...term.split(/[_ .-]+/).filter(part => part.length > 1),
+    ...(/^crc(?:16|32|64)(?:-|$)/.test(term) ? ['crc'] : []),
+  ]);
   const chineseText = lowered.replace(/\s+/g, '');
   const chinese = [...chineseText.matchAll(/[\u4e00-\u9fff]{2,}/g)].flatMap((match) => {
     const text = match[0];
     return Array.from({ length: Math.max(0, text.length - 1) }, (_, index) => text.slice(index, index + 2));
   });
-  return new Set([...latin, ...chinese]);
+  // These conversational question fragments create false matches across almost
+  // every Chinese interview question (for example, an interests question used
+  // to match technical entries containing "有什么区别"). They carry no
+  // retrieval meaning on their own.
+  const chineseQuestionStopTerms = new Set(['有什', '什么', '怎么', '么办', '发生']);
+  return new Set([...latin, ...chinese.filter((term) => !chineseQuestionStopTerms.has(term))]);
 }
 
 const PROJECT_PATTERNS = {
@@ -21,8 +32,9 @@ const PROJECT_PATTERNS = {
   ice_temperature: /ice_temperature|冰体|109\s*(?:个|路|点)|stm32f767|\bf767\b|onenet|多点温度/i,
   wing_icing: /wing_icing|机翼结冰|ad5940|冰风洞|fl-?61|运-?12/i,
   plankiller: /plankiller|执行力管理|计划管理|习惯复盘/i,
-  career_evidence_lab: /career_evidence_lab|career\s*evidence\s*lab|求证面试|证据驱动的求职/i,
+  career_evidence_lab: /career_evidence_lab|career\s*evidence\s*lab|求证面试|面试验证台|证据驱动的求职/i,
   genealogy_agent: /genealogy_agent|族谱|世系|paddleocr/i,
+  interview_assistant: /interview[ _-]?assistant|面试助手|funasr|paraformer/i,
 };
 
 function projectTags(value) {
@@ -35,8 +47,9 @@ function projectTags(value) {
 function projectScore(question, entry) {
   const queryProjects = projectTags(question);
   if (queryProjects.size === 0) return 0;
+  const declaredProjects = new Set(entry.project_ids ?? []);
   const entryProjects = new Set([
-    ...(entry.project_ids ?? []),
+    ...declaredProjects,
     ...projectTags([
     entry.title,
     entry.category,
@@ -44,7 +57,11 @@ function projectScore(question, entry) {
     entry.content,
     ].join(' ')),
   ]);
-  if ([...queryProjects].some((project) => entryProjects.has(project))) return 40;
+  if ([...queryProjects].some((project) => entryProjects.has(project))) {
+    // Broad portfolio summaries support a project answer, but dedicated
+    // evidence for the named project must rank first.
+    return declaredProjects.size > 1 ? 10 : 100;
+  }
   return entryProjects.size > 0 ? -20 : 0;
 }
 
@@ -83,6 +100,9 @@ export function searchKnowledgeBase(question, entries, topK = 5) {
       else if (titleTerms.has(term)) score += 3;
       else if (contentTerms.has(term)) score += 1;
     }
+    // Provenance is only a tie-breaker. It must never manufacture a match for
+    // an otherwise unrelated résumé entry.
+    if (score <= 0) return { entry, score: 0 };
     if (entry.fact_status === 'resume_fact') score += 0.25;
     else if (entry.fact_status === 'prepared_answer') score += 0.15;
     score += projectScore(question, entry);

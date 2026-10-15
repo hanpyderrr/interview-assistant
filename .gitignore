@@ -460,6 +460,8 @@ fixtures/
 # before its contents can be.
 !electron/**/__tests__/fixtures/
 !electron/**/__tests__/fixtures/**
+!scripts/__tests__/fixtures/
+!scripts/__tests__/fixtures/kb-*.fixture.jsonl
 !validation/knowledge-dialog/fixtures/
 !validation/knowledge-dialog/fixtures/**
 tools/
@@ -529,3 +531,6 @@ docs/superpowers/plans/*
 # Alternate portable build output (release dir is locked by VS Code)
 /release2/
 /release3/
+
+# Personal knowledge documents and interview transcripts stay local.
+/面试助手知识库/

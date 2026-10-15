@@ -14,6 +14,11 @@ export type LatencyEventName = typeof LATENCY_EVENT_NAMES[number]
 export type LatencyProviderOutcome = 'success' | 'timeout' | 'error' | 'unknown'
 export const DEFAULT_PROVIDER_DEADLINE_MS = 7000
 
+export function interviewProviderDeadlineMs(model: string): number {
+  // Project answers are held until validation; allow ChatGPT to finish that draft.
+  return model === 'codex-cli' || model.startsWith('codex-cli:') ? 20000 : DEFAULT_PROVIDER_DEADLINE_MS
+}
+
 export type LatencyRecord = {
   questionGenerationId: string
   events: Partial<Record<LatencyEventName, number>>

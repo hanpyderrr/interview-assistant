@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useT } from '../../i18n';
 import { Plus, Trash2, Edit2, AlertCircle, Save, ChevronDown, Check, RefreshCw, ExternalLink, Loader2, LogOut, Cloud, Server, Eye, Info, MessageSquare, Image, FileText, User, Boxes, ClipboardList, Laptop } from 'lucide-react';
-import { CODEX_CLI_MODEL, CODEX_CLI_MODEL_PRESETS, codexCliSelectorId, STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
+import { CODEX_CLI_MODEL, codexCliSelectorId, STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
 import { validateCurl } from '../../lib/curl-validator';
 import { ProviderCard } from './ProviderCard';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
@@ -1711,38 +1711,19 @@ const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChange, pla
     );
 };
 
-/**
- * Codex model picker. Was a free-text input beside a narrow "Preset" dropdown,
- * which showed the same id twice — once as editable text, once as the dropdown's
- * value. The dropdown is now the whole control.
- *
- * Trade-off, deliberate: typing an id outside CODEX_CLI_MODEL_PRESETS is no longer
- * possible. A model already persisted from elsewhere still renders and stays
- * selected (it is prepended to the option list below), so no existing
- * configuration breaks — but a NEW arbitrary id can't be entered here any more.
- * Add it to CODEX_CLI_MODEL_PRESETS in src/utils/modelUtils.ts instead.
- */
+/** Only advertise models returned for the connected ChatGPT plan. */
 const CodexCliModelField: React.FC<{
     label: string;
     value: string;
+    models: Array<{ id: string; label: string }>;
     onSelect: (value: string) => void;
-}> = ({ label, value, onSelect }) => {
+}> = ({ label, value, models, onSelect }) => {
     const t = useT();
-    return (
-    <label className="space-y-1 block min-w-0">
+    return <label className="space-y-1 block min-w-0">
         <span className="aip-label">{label}</span>
-        <ModelSelect
-            value={value}
-            options={value && !CODEX_CLI_MODEL_PRESETS.some(option => option.id === value)
-                // Keep a value that came from a previous build or a hand-edited
-                // config selectable rather than silently dropping it.
-                ? [{ id: value, name: prettifyModelId(value) }, ...CODEX_CLI_MODEL_PRESETS]
-                : CODEX_CLI_MODEL_PRESETS}
-            onChange={onSelect}
-            placeholder={t("Select a model")}
-        />
-    </label>
-    );
+        <ModelSelect value={value} options={models.map(m => ({ id: m.id, name: m.label }))}
+            onChange={onSelect} placeholder={t('Select a model')} />
+    </label>;
 };
 
 interface AIProvidersSettingsProps {
@@ -1879,6 +1860,9 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
     // without leaving Settings.
     const [codexOauthStatus, setCodexOauthStatus] = useState<{ signedIn: boolean; email?: string; expiresAt?: number }>({ signedIn: false });
     const [codexOauthInProgress, setCodexOauthInProgress] = useState(false);
+    const [codexModels, setCodexModels] = useState<Array<{ id: string; label: string }>>([]);
+    const [codexModelRefresh, setCodexModelRefresh] = useState(0);
+    const [codexModelsLoading, setCodexModelsLoading] = useState(false);
 
     // --- Default Model ---
     const [defaultModel, setDefaultModel] = useState<string>('gemini-3.6-flash');
@@ -2141,10 +2125,10 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
         }
         if (isCodexReady && isProviderEnabled('codex-cli')) {
             opts.push({ id: CODEX_CLI_MODEL.id, name: `${CODEX_CLI_MODEL.name} (${prettifyModelId(codexCliConfig.model)})` });
-            CODEX_CLI_MODEL_PRESETS.forEach(model => {
+            codexModels.forEach(model => {
                 const id = codexCliSelectorId(model.id);
                 if (!opts.find(o => o.id === id)) {
-                    opts.push({ id, name: `${CODEX_CLI_MODEL.name}: ${model.name}` });
+                    opts.push({ id, name: `${CODEX_CLI_MODEL.name}: ${model.label}` });
                 }
             });
         }
@@ -2363,12 +2347,7 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
                     setCodexOauthStatus(prev => ({ ...prev, signedIn: true, email: info?.email || prev.email }));
                     setCodexAuthStatus('success');
                     setCodexAuthMessage(`${t('Signed in to ChatGPT')}${info?.email ? ` ${t('as')} ${info.email}` : ''}.`);
-                    // Auto-enable codex now that we're signed in.
-                    setCodexCliConfig(prev => {
-                        const next = { ...prev, enabled: true };
-                        window.electronAPI?.setCodexCliConfig?.(next);
-                        return next;
-                    });
+
                 }));
             }
             if (api?.onCodexLoginFailed) {
@@ -2393,6 +2372,35 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
         } catch { /* subscriptions are best-effort */ }
         return () => { for (const u of unsubs) try { u(); } catch { /* noop */ } };
     }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+        setCodexModels([]);
+        if (!codexOauthStatus.signedIn) return;
+        setCodexModelsLoading(true);
+        setCodexCliError('');
+        (async () => {
+            try {
+                const result = await window.electronAPI.codexListModels();
+                if (cancelled) return;
+                if (!result.success || !result.models?.length) throw new Error(result.error || '此账户未返回可用的会员模型，请检查 ChatGPT 中的应用额度授权。');
+                const models = result.models;
+                const current = await window.electronAPI.getCodexCliConfig();
+                if (cancelled) return;
+                const next = { ...current, enabled: true,
+                    model: models.some(m => m.id === current.model) ? current.model : models[0].id,
+                    fastModel: models.some(m => m.id === current.fastModel) ? current.fastModel : models[0].id };
+                const saved = await window.electronAPI.setCodexCliConfig(next);
+                if (cancelled) return;
+                if (!saved.success) throw new Error(saved.error || '模型配置保存失败。');
+                setCodexModels(models);
+                setCodexCliConfig(next as typeof codexCliConfig);
+            } catch (error: any) {
+                if (!cancelled) { setCodexCliStatus('error'); setCodexCliError(error.message || '模型列表加载失败，请重试。'); }
+            } finally { if (!cancelled) setCodexModelsLoading(false); }
+        })();
+        return () => { cancelled = true; };
+    }, [codexOauthStatus.signedIn, codexOauthStatus.email, codexModelRefresh]);
 
     // Load Screen Understanding (vision routing) settings
     useEffect(() => {
@@ -2624,9 +2632,11 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
     const handleCodexSignOut = async () => {
         const api = window.electronAPI as any;
         try {
-            await api?.codexSignOut?.();
+            const result = await api?.codexSignOut?.();
+            if (!result?.success) throw new Error(result?.error || '退出失败。');
             setCodexOauthStatus({ signedIn: false });
-        } catch { /* noop */ }
+            if (result.warning) { setCodexAuthStatus('error'); setCodexAuthMessage(result.warning); }
+        } catch (error: any) { setCodexAuthStatus('error'); setCodexAuthMessage(error.message || '退出失败。'); }
     };
 
     const handleCodexRefresh = async () => {
@@ -3159,7 +3169,7 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
                     <div className="flex items-start gap-2.5 min-w-0">
                         <AipProviderMark provider="codex" name="ChatGPT (Codex)" className="mt-0.5" />
                         <div className="min-w-0">
-                        <h3 className="text-sm font-bold aip-hero mb-1">ChatGPT (Codex)</h3>
+                        <h3 className="text-sm font-bold aip-hero mb-1">ChatGPT 会员</h3>
                         <p className="text-xs aip-muted">{t('Use your ChatGPT Plus/Pro subscription as an AI provider — no API key needed.')}</p>
                         </div>
                     </div>
@@ -3226,7 +3236,7 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
                             >
                                 {codexOauthInProgress || codexAuthAction === 'login'
                                     ? <><Loader2 size={13} strokeWidth={1.75} className="aip-spinner" /> {t('Waiting for browser…')}</>
-                                    : <><ExternalLink size={13} strokeWidth={1.75} /> {t('Sign in with ChatGPT')}</>}
+                                    : <><ExternalLink size={13} strokeWidth={1.75} /> {t('Continue with ChatGPT')}</>}
                             </button>
                         </div>
                     )}
@@ -3237,11 +3247,19 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
                         </p>
                     )}
 
+                    {codexOauthStatus.signedIn && <div className="flex items-center gap-2 text-xs aip-muted">
+                        <button className="aip-btn" type="button" disabled={codexModelsLoading}
+                            onClick={() => setCodexModelRefresh(n => n + 1)}>
+                            {codexModelsLoading ? '正在读取账户模型…' : '刷新账户模型'}
+                        </button>
+                        <span>使用会员额度；以实际回答测试确认可用。</span>
+                    </div>}
                     {/* Model + settings — only shown once signed in */}
                     {codexOauthStatus.signedIn && (
                         <>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                 <CodexCliModelField
+                                    models={codexModels}
                                     label={t("Model")}
                                     value={codexCliConfig.model}
                                     onSelect={(model) => {
@@ -3250,6 +3268,7 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
                                     }}
                                 />
                                 <CodexCliModelField
+                                    models={codexModels}
                                     label={t("Fast Mode Model")}
                                     value={codexCliConfig.fastModel}
                                     onSelect={(fastModel) => {
@@ -3325,7 +3344,7 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
                                 <button
                                     type="button"
                                     onClick={handleTestCodexCli}
-                                    disabled={codexCliStatus === 'testing'}
+                                    disabled={codexCliStatus === 'testing' || codexModelsLoading || !codexModels.length}
                                     className="aip-btn shrink-0 min-w-[124px]"
                                     data-tone={codexCliStatus === 'success' ? 'ok' : codexCliStatus === 'error' ? 'danger' : undefined}
                                 >

@@ -91,7 +91,7 @@ test('provider errors keep the answer panel useful with a local fallback from re
     id: 1,
     hits: [{
       id: 'resume.004',
-      title: '多进程与共享内存通信',
+      title: 'SPI 接收为什么拆成独立进程？',
       excerpt: '将SPI接收、数据处理、Qt显示和5G通信拆分为独立进程，使用共享内存和POSIX信号量交换大块数据，减少进程间数据拷贝。',
       score: 5.25,
       source: 'resume_fact',
@@ -102,10 +102,19 @@ test('provider errors keep the answer panel useful with a local fallback from re
   const item = state.items[0];
   assert.equal(item.status, 'error');
   assert.equal(item.error, '503 Service temporarily unavailable');
-  assert.match(item.answer, /模型服务暂时不可用/);
-  assert.match(item.answer, /多进程与共享内存通信/);
+  assert.match(item.answer, /题库参考/);
+  assert.equal(item.answerSource, 'reference');
+  assert.match(item.answer, /SPI 接收为什么拆成独立进程/);
   assert.match(item.answer, /共享内存和POSIX信号量/);
   assert.doesNotMatch(item.answer, /正在生成回答/);
+});
+
+test('HR fallback does not force technical framing when no personal evidence exists', async () => {
+  const { buildLocalFallbackAnswer } = await loadHistory();
+  const answer = buildLocalFallbackAnswer('你上学累不累？', [], '503 Service temporarily unavailable');
+
+  assert.match(answer, /参考表达|真实情况/);
+  assert.doesNotMatch(answer, /项目|架构|性能|设计|工程师/);
 });
 
 test('provider timeout placeholder answers are replaced by local fallback drafts', async () => {
@@ -117,7 +126,7 @@ test('provider timeout placeholder answers are replaced by local fallback drafts
     id: 1,
     hits: [{
       id: 'resume.002',
-      title: '能耗监测平台总体架构',
+      title: '智能家居能耗监测平台的实时数据链路怎么设计？',
       excerpt: '能耗监测平台基于 Linux 嵌入式网关，包含传感器采集、规则引擎、可视化看板和远程告警推送。',
       score: 4.5,
       source: 'resume_fact',
@@ -132,8 +141,8 @@ test('provider timeout placeholder answers are replaced by local fallback drafts
   const item = state.items[0];
   assert.equal(item.status, 'error');
   assert.match(item.error || '', /模型超时/);
-  assert.match(item.answer, /本地兜底口述稿/);
-  assert.match(item.answer, /能耗监测平台总体架构/);
+  assert.match(item.answer, /题库参考/);
+  assert.match(item.answer, /能耗监测平台.*实时数据链路/);
   assert.doesNotMatch(item.answer, /The model did not produce/);
 });
 
@@ -154,8 +163,9 @@ test('provider timeout done event does not replace a useful streamed answer', as
   });
 
   const item = state.items[0];
-  assert.equal(item.status, 'answered');
-  assert.equal(item.error, undefined);
+  assert.equal(item.status, 'error');
+  assert.equal(item.answerSource, 'model');
+  assert.match(item.error, /模型超时/);
   assert.match(item.answer, /shared memory to reduce copies/);
   assert.doesNotMatch(item.answer, /The model did not produce/);
 });

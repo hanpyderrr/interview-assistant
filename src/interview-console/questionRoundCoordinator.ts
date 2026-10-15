@@ -16,6 +16,7 @@ export type RoundBoundaryReason =
   | 'arrival-gap'
   | 'candidate-turn'
   | 'round-closed'
+  | 'manual-submit'
   | 'first-round'
   | null;
 
@@ -85,11 +86,13 @@ export interface ProviderEvent {
 
 export interface QuestionRoundCoordinatorOptions {
   allocateAnswerId: () => number;
+  isQuestionReady?: (question: string) => boolean;
   provisionalDelayMs?: number;
   roundGapMs?: number;
 }
 
 export interface QuestionRoundCoordinator {
+  acceptManualQuestion(question: string): { actions: RoundAction[] };
   acceptInterviewerFinal(final: TranscriptFinal): { actions: RoundAction[] };
   acceptCandidateFinal(final: TranscriptFinal): { actions: RoundAction[] };
   tick(arrivalMs: number): { actions: RoundAction[] };
@@ -115,6 +118,7 @@ export function createQuestionRoundCoordinator(
   options: QuestionRoundCoordinatorOptions,
 ): QuestionRoundCoordinator {
   const allocateAnswerId = options.allocateAnswerId;
+  const isQuestionReady = options.isQuestionReady ?? (() => true);
   const provisionalDelayMs = isFiniteNumber(options.provisionalDelayMs)
     ? options.provisionalDelayMs
     : DEFAULT_PROVISIONAL_DELAY_MS;
@@ -315,7 +319,7 @@ export function createQuestionRoundCoordinator(
     turns = [...turns, { ...final }];
     rememberProvenance(final);
 
-    if (answerId === null || attemptId === null) return { actions };
+    if (answerId === null || attemptId === null || !isQuestionReady(pendingQuestion)) return { actions };
 
     cancelActiveAttempt(actions);
     // A same-round restart supersedes the previous attempt regardless of whether
@@ -361,6 +365,21 @@ export function createQuestionRoundCoordinator(
     };
   }
 
+  // Explicit submission is a new question, including deliberate repeats. It
+  // uses the same attempt lifecycle without pretending to be an audio final.
+  function acceptManualQuestion(question: string): { actions: RoundAction[] } {
+    const text = question.trim();
+    if (!text) return { actions: [] };
+    const actions: RoundAction[] = [];
+    cancelActiveAttempt(actions);
+    retireAttempt(sessionGeneration, answerId, attemptId);
+    startRound({ speaker: 'interviewer', text, final: true }, 'manual-submit');
+    rememberProvenance({});
+    actions.push(fireProvisionalGeneration());
+    roundOpen = false;
+    return { actions };
+  }
+
   function acceptCandidateFinal(final: TranscriptFinal): { actions: RoundAction[] } {
     if (roundId === null) return { actions: [] };
     if (final.speaker !== 'user' || final.final !== true) return { actions: [] };
@@ -374,6 +393,7 @@ export function createQuestionRoundCoordinator(
     // provisionally, but keep the round open until the next interviewer final
     // proves whether this was a real candidate turn or overlapping cross-talk.
     const shouldFlush = pendingQuestion.trim()
+      && isQuestionReady(pendingQuestion)
       && !provisionalFired
       && answerId === null
       && status === 'idle';
@@ -388,7 +408,7 @@ export function createQuestionRoundCoordinator(
 
   function tick(arrivalMs: number): { actions: RoundAction[] } {
     if (!roundOpen || provisionalFired || status !== 'idle') return { actions: [] };
-    if (!pendingQuestion.trim()) return { actions: [] };
+    if (!pendingQuestion.trim() || !isQuestionReady(pendingQuestion)) return { actions: [] };
     if (!isFiniteNumber(arrivalMs) || !isFiniteNumber(lastArrivalMs)) return { actions: [] };
     if (arrivalMs - lastArrivalMs < provisionalDelayMs) return { actions: [] };
 
@@ -464,6 +484,7 @@ export function createQuestionRoundCoordinator(
   }
 
   return {
+    acceptManualQuestion,
     acceptInterviewerFinal,
     acceptCandidateFinal,
     tick,

@@ -1,3 +1,4 @@
+import type { InterviewRecordsAPI } from '../shared/interviewRecords';
 import { contextBridge, ipcRenderer } from 'electron';
 import type { SkillUploadPayload } from './services/skills/SkillValidator';
 
@@ -52,7 +53,7 @@ type AlibabaFunAsrPublicConfig = {
 };
 
 // Types for the exposed Electron API
-interface ElectronAPI {
+interface ElectronAPI extends InterviewRecordsAPI {
   updateContentDimensions: (dimensions: { width: number; height: number }) => Promise<void>;
   updateContentDimensionsCentered: (dimensions: { width: number; height: number }) => Promise<void>;
   sendOverlayUiState: (state: Record<string, unknown>) => Promise<void>;
@@ -108,7 +109,7 @@ interface ElectronAPI {
 
   // LLM Model Management
   getCurrentLlmConfig: () => Promise<{
-    provider: 'ollama' | 'gemini' | 'custom' | 'codex-cli';
+    provider: 'ollama' | 'gemini' | 'custom' | 'codex-cli' | 'deepseek';
     /**
      * @deprecated Use `modelId` for selection comparisons and `displayName`
      * for UI labels. Kept as an alias of `modelId` for back-compat.
@@ -502,6 +503,7 @@ interface ElectronAPI {
   resetIntelligence: () => Promise<{ success: boolean; error?: string }>;
 
   // Meeting Lifecycle
+  setCandidateCaptureEnabled: (enabled: boolean) => Promise<{ success: boolean }>;
   startMeeting: (metadata?: any) => Promise<{ success: boolean; error?: string }>;
   endMeeting: () => Promise<{ success: boolean; error?: string }>;
   /** Test-only (deep-run 2 issue 10): inject transcript segments with origin
@@ -660,9 +662,10 @@ interface ElectronAPI {
   // ChatGPT OAuth IPCs — replace the old `codex login` CLI subprocess flow.
   // startLogin kicks off the PKCE flow + opens the system browser; the
   // renderer listens for codex:login:complete / :failed events to update UI.
+  codexListModels: () => Promise<{ success: boolean; models?: Array<{ id: string; label: string }>; error?: string }>;
   codexLoginStatus: () => Promise<{ success: boolean; signedIn: boolean; email?: string; expiresAt?: number; error?: string }>;
   codexStartLogin: () => Promise<{ success: boolean; email?: string; expiresAt?: number; error?: string }>;
-  codexSignOut: () => Promise<{ success: boolean; error?: string }>;
+  codexSignOut: () => Promise<{ success: boolean; remoteRevoked?: boolean; warning?: string; error?: string }>;
   codexRefreshTokens: () => Promise<{ success: boolean; email?: string; expiresAt?: number; error?: string }>;
 
   // Demo
@@ -716,8 +719,8 @@ interface ElectronAPI {
     message: string,
     imagePaths?: string[],
     context?: string,
-    options?: { skipSystemPrompt?: boolean; ignoreKnowledgeMode?: boolean },
-  ) => Promise<void>;
+    options?: { skipSystemPrompt?: boolean; ignoreKnowledgeMode?: boolean; interviewTest?: boolean; interviewQuestion?: string; hasRelevantPersonalEvidence?: boolean; interviewProjectIds?: string[] },
+  ) => Promise<void | null | { finalText: string; streamId: number }>;
   onGeminiStreamToken: (callback: (token: string, meta?: { streamId?: number }) => void) => () => void;
   onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number }) => void) => () => void;
   onGeminiStreamError: (callback: (error: string, meta?: { streamId?: number | null; source?: string }) => void) => () => void;
@@ -1883,13 +1886,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // Meeting Lifecycle
+  setCandidateCaptureEnabled: (enabled: boolean) => ipcRenderer.invoke('set-candidate-capture-enabled', enabled),
   startMeeting: (metadata?: any) => ipcRenderer.invoke('start-meeting', metadata),
   endMeeting: () => ipcRenderer.invoke('end-meeting'),
-  retrieveInterviewKnowledge: (question: string) => ipcRenderer.invoke('interview:retrieve-knowledge', question),
+  retrieveInterviewKnowledge: (question: string, scope?: { role?: '' | 'ai_agent' | 'embedded_linux'; projectIds?: string[] }) => ipcRenderer.invoke('interview:retrieve-knowledge', question, scope),
   debugInjectTranscript: (segments: Array<{ speaker?: string; text: string; timestamp?: number; confidence?: number }>) =>
     ipcRenderer.invoke('debug-inject-transcript', segments),
   finalizeMicSTT: () => ipcRenderer.invoke('finalize-mic-stt'),
   getRecentMeetings: () => ipcRenderer.invoke('get-recent-meetings'),
+  beginInterviewRecord: (input) => ipcRenderer.invoke('interview-record:begin', input),
+  saveInterviewRecord: (id, rounds, turns) => ipcRenderer.invoke('interview-record:save', id, rounds, turns),
+  setInterviewRecordCapture: (id, enabled) => ipcRenderer.invoke('interview-record:capture', id, enabled),
+  endInterviewRecord: (id, status) => ipcRenderer.invoke('interview-record:end', id, status),
+  listInterviewRecords: (offset = 0) => ipcRenderer.invoke('interview-record:list', offset),
+  getInterviewRecord: (id) => ipcRenderer.invoke('interview-record:get', id),
+  reviewInterviewRound: (id, roundId, review) => ipcRenderer.invoke('interview-record:review', id, roundId, review),
+  exportInterviewRecord: (id, format) => ipcRenderer.invoke('interview-record:export', id, format),
   getMeetingDetails: (id: string) => ipcRenderer.invoke('get-meeting-details', id),
   searchGlobalMeetings: (query: string, filters?: any) => ipcRenderer.invoke('search:global-meetings', { query, filters }),
   searchInMeeting: (query: string) => ipcRenderer.invoke('search:in-meeting', { query }),
@@ -2109,7 +2121,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     message: string,
     imagePaths?: string[],
     context?: string,
-    options?: { skipSystemPrompt?: boolean; ignoreKnowledgeMode?: boolean },
+    options?: { skipSystemPrompt?: boolean; ignoreKnowledgeMode?: boolean; interviewTest?: boolean; interviewQuestion?: string; hasRelevantPersonalEvidence?: boolean; interviewProjectIds?: string[] },
   ) => ipcRenderer.invoke('gemini-chat-stream', message, imagePaths, context, options),
   cleanupCandidateSpeech: (text: string) => ipcRenderer.invoke('interview:candidate-speech-cleanup', text),
   cancelCandidateSpeechCleanup: () => ipcRenderer.send('interview:candidate-speech-cleanup-cancel'),
@@ -2194,6 +2206,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ChatGPT OAuth (PKCE) — replaces the old `codex login` CLI subprocess.
   // The renderer listens for `codex:login:complete` / `:failed` /
   // `:signed-out` / `:tokens:refreshed` events for live UI updates.
+  codexListModels: () => ipcRenderer.invoke('codex:list-models'),
   codexLoginStatus: () => ipcRenderer.invoke('codex:login-status'),
   codexStartLogin: () => ipcRenderer.invoke('codex:start-login'),
   codexSignOut: () => ipcRenderer.invoke('codex:sign-out'),

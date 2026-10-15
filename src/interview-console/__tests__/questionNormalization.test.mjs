@@ -33,3 +33,16 @@ test('converts Taiwan and Hong Kong traditional forms without localizing vocabul
     '请介绍台湾软体团队如何设计 RK3568 网路连线与 Buildroot 驱动',
   );
 });
+
+
+test('corrects observed converter homophones only with electrical sampling context', () => {
+  assert.equal(normalizeInterviewQuestion('学习魔术转换压力大吗？另外采样精度受哪些因素影响？'), '学习模数转换压力大吗？另外采样精度受哪些因素影响？');
+  assert.equal(normalizeInterviewQuestion('魔术转换时怎样让观众看不出破绽？'), '魔术转换时怎样让观众看不出破绽？');
+});
+
+test('corrects DNA to DMA only in peripheral troubleshooting without biology context', () => {
+  assert.equal(normalizeInterviewQuestion('外设丢数据要检查中断dna时序还是电源？'), '外设丢数据要检查中断DMA时序还是电源？');
+  for (const q of ['DNA复制原理是什么？', 'DNA序列采样如何保证精度？', 'DNA测序设备外设丢数据如何排查中断？', '解释cDNA与DNA的区别']) {
+    assert.equal(normalizeInterviewQuestion(q), q);
+  }
+});

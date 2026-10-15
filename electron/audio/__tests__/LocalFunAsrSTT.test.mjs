@@ -51,7 +51,6 @@ describe('LocalFunAsrSTT', () => {
         assert.deepEqual(finals, [{
             text: 'static关键字有什么作用？',
             isFinal: true,
-            confidence: 0.9,
             segmentId: 1,
             audioStartMs: 0,
             audioEndMs: 200,

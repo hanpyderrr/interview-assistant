@@ -1,0 +1,6 @@
+{"id": "ai.fix.001", "title": "RAG 混合检索", "keywords": ["RAG", "混合检索"], "content": "合成测试资料：RAG 混合检索 的基本说明。", "fact_status": "prepared_answer", "review_status": "fixture", "personal_claim": true, "source_paths": ["fixtures/synthetic.md"]}
+{"id": "ai.fix.002", "title": "向量索引", "keywords": ["向量索引"], "content": "合成测试资料：向量索引 的基本说明。", "fact_status": "resume_fact", "review_status": "fixture", "personal_claim": false, "source_paths": ["fixtures/synthetic.md"]}
+{"id": "ai.fix.003", "title": "模型超时", "keywords": ["模型超时"], "content": "合成测试资料：模型超时 的基本说明。", "fact_status": "prepared_answer", "review_status": "fixture", "personal_claim": false, "source_paths": ["fixtures/synthetic.md"]}
+{"id": "ai.fix.004", "title": "Agent 工具", "keywords": ["Agent", "工具"], "content": "合成测试资料：Agent 工具 的基本说明。", "fact_status": "prepared_answer", "review_status": "fixture", "personal_claim": false, "source_paths": ["fixtures/synthetic.md"]}
+{"id": "ai.fix.005", "title": "OCR 校验", "keywords": ["OCR", "校验"], "content": "合成测试资料：OCR 校验 的基本说明。", "fact_status": "prepared_answer", "review_status": "fixture", "personal_claim": false, "source_paths": ["fixtures/synthetic.md"]}
+{"id": "ai.fix.006", "title": "提示词边界", "keywords": ["提示词边界"], "content": "合成测试资料：提示词边界 的基本说明。", "fact_status": "prepared_answer", "review_status": "fixture", "personal_claim": false, "source_paths": ["fixtures/synthetic.md"]}

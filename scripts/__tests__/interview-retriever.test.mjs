@@ -79,6 +79,61 @@ test('returns no matches for empty or unrelated questions', () => {
   assert.deepEqual(searchKnowledgeBase('量子火箭推进', [{ id: 'x', title: 'SPI', content: 'CRC32', keywords: ['SPI'] }]), []);
 });
 
+test('returns no matches for an unrelated personal question against a resume fact', () => {
+  // A fact_status bonus must never manufacture a match: "你上学累不累" shares no
+  // keyword/title/content term with this SPI entry, so the result must be empty
+  // even though the entry is a resume_fact with a 0.25 bonus.
+  const entries = [
+    {
+      id: 'embedded.spi',
+      title: 'SPI 帧同步',
+      content: '状态机与 CRC32 错误恢复',
+      keywords: ['SPI', 'CRC32'],
+      fact_status: 'resume_fact',
+    },
+  ];
+  assert.deepEqual(searchKnowledgeBase('你上学累不累', entries), []);
+});
+
+test('generic question wording does not match technical entries through common Chinese phrases', () => {
+  // "有什/什么" appear inside technical titles ("有什么区别") and would otherwise
+  // make every interests question match unrelated technical entries.
+  const entries = [
+    { id: 'tech-1', title: 'MCP 和 Skills 有什么区别', content: 'Agent 系统设计', keywords: ['MCP', 'Skills'], fact_status: 'prepared_answer' },
+    { id: 'tech-2', title: '线程优先级什么时候有用', content: '实时调度策略', keywords: ['线程', '优先级'], fact_status: 'prepared_answer' },
+  ];
+  assert.deepEqual(searchKnowledgeBase('你平时有什么兴趣爱好', entries), []);
+});
+
+test('still retrieves a normal SPI question after stop-term filtering', () => {
+  const entries = [
+    { id: 'embedded.spi', title: 'SPI 帧同步', content: '状态机与 CRC32 错误恢复', keywords: ['SPI', 'CRC32'], fact_status: 'resume_fact' },
+    { id: 'embedded.qt', title: 'Qt 显示', content: '信号槽与线程', keywords: ['Qt'], fact_status: 'prepared_answer' },
+  ];
+  const results = searchKnowledgeBase('SPI 字节流如何完成帧同步和 CRC32 错误恢复', entries, 3);
+  assert.ok(results.length > 0);
+  assert.equal(results[0].entry.id, 'embedded.spi');
+  assert.ok(results[0].score > 0);
+});
+
+test('maps 面试验证台 to Career Evidence Lab instead of a physical test bench', () => {
+  const entries = [
+    { id: 'career', title: 'Career Evidence Lab', content: '十题动态面试与证据验证。', keywords: ['动态面试'], project_ids: ['career_evidence_lab'], fact_status: 'resume_fact' },
+    { id: 'wing', title: '机翼结冰试验验证', content: '风洞验证台与采集链路。', keywords: ['验证台'], project_ids: ['wing_icing'], fact_status: 'resume_fact' },
+  ];
+  const results = searchKnowledgeBase('为什么会想到做面试验证台这个项目？', entries, 2);
+  assert.equal(results[0].entry.id, 'career');
+});
+
+test('prefers a single-project entry over a broad portfolio entry', () => {
+  const entries = [
+    { id: 'portfolio', title: '为什么族谱数字化项目要拆分多个 Agent', content: '族谱数字化与其他项目形成证据管理主线。', keywords: ['族谱数字化', '拆分多个 Agent'], project_ids: ['tof', 'career_evidence_lab', 'genealogy_agent'], fact_status: 'prepared_answer' },
+    { id: 'genealogy', title: '族谱处理状态', content: 'OCR 候选、关系建议和确认事实分层。', keywords: ['族谱'], project_ids: ['genealogy_agent'], fact_status: 'resume_fact' },
+  ];
+  const results = searchKnowledgeBase('为什么族谱项目要拆分多个 Agent？', entries, 2);
+  assert.equal(results[0].entry.id, 'genealogy');
+});
+
 test('prefers a project-specific boundary answer over a cross-project protocol template', () => {
   const entries = [
     {
